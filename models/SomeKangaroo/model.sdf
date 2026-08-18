@@ -1,0 +1,31 @@
+<?xml version="1.0"?>
+<sdf version="1.6">
+  <model name="kangaroo">
+    <static>true</static>
+
+    <link name="body">
+      <visual name="kangaroo_visual">
+        <geometry>
+          <mesh>
+            <uri>model://SomeKangaroo/meshes/kangaroo.stl</uri>
+            <scale>1 1 1</scale>
+          </mesh>
+        </geometry>
+
+        <material>
+          <ambient>0.35 0.18 0.08 1</ambient>
+          <diffuse>0.55 0.28 0.10 1</diffuse>
+          <specular>0.1 0.1 0.1 1</specular>
+        </material>
+      </visual>
+
+      <collision name="collision">
+        <geometry>
+          <box>
+            <size>1 0.5 1.5</size>
+          </box>
+        </geometry>
+      </collision>
+    </link>
+  </model>
+</sdf>
