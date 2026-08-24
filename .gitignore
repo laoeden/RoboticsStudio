@@ -2,3 +2,7 @@
 build/
 install/
 log/
+yolo_env/
+weights/
+VS_tests/
+.vscode/
