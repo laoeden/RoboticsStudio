@@ -65,11 +65,25 @@
       <pose>5.0 0.0 0 0 0 0</pose>
     </include>
 
+    <!-- Rocks -->
+    <include>
+      <uri>https://fuel.gazebosim.org/1.0/OpenRobotics/models/Falling%20Rock%201</uri>
+      <name>rocks1</name>
+      <pose>-3 2 1 0 0 0</pose>
+    </include>
+
     <!-- Kangaroo -->
     <include>
       <uri>model://SomeKangaroo</uri>
       <name>kangaroo</name>
       <pose>2 0 0 0 0 0</pose>
+    </include>
+
+    <!--dry grass-->
+    <include>
+       <uri>model://Dry_Grass</uri>
+       <name>dry_grass</name>
+       <pose>0 0 0 0 0 0</pose>
     </include>
 
   </world>

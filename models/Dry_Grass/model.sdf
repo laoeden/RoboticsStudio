@@ -1,0 +1,28 @@
+<?xml version="1.0"?>
+<sdf version="1.6">
+  <model name="dry_grass">
+    <static>true</static>
+
+    <link name="grass">
+      <visual name="grass_visual">
+        <!-- Put the down slightly so its base sits below the image. -->
+        <pose>0 0 -0.03 0 0 0</pose>
+
+        <geometry>
+          <mesh>
+            <uri>model://Dry_Grass/meshes/drygrass.dae</uri>
+            <scale>1 1 1</scale>
+          </mesh>
+        </geometry>
+
+
+        <material>
+          <ambient>0.35 0.20 0.05 1</ambient>
+          <diffuse>0.55 0.32 0.08 1</diffuse>
+          <specular>0.05 0.05 0.05 1</specular>
+        </material>
+
+      </visual>
+    </link>
+  </model>
+</sdf>

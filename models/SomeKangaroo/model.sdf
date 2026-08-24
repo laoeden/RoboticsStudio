@@ -8,7 +8,8 @@
         <geometry>
           <mesh>
             <uri>model://SomeKangaroo/meshes/kangaroo.stl</uri>
-            <scale>1 1 1</scale>
+            <!-- The STL is in centimetres; convert it to metres. -->
+            <scale>0.01 0.01 0.01</scale>
           </mesh>
         </geometry>
 
@@ -20,9 +21,11 @@
       </visual>
 
       <collision name="collision">
+        <!-- Approximate the scaled mesh's bounding box. -->
+        <pose>1.25 1.05 0.776 0 0 0</pose>
         <geometry>
           <box>
-            <size>1 0.5 1.5</size>
+            <size>0.934 1.660 1.552</size>
           </box>
         </geometry>
       </collision>
