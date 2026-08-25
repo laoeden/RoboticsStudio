@@ -1,5 +1,8 @@
 .venv/
-41068_ignition_bringup/
+.vscode/
+yolo_env/
 build/
 install/
 log/
+VS_tests/
+weights/
