@@ -78,42 +78,6 @@ def add_robot(
     )
 
     robot_enabled = _if_true(enabled_arg)
-
-    ld.add_action(Node(
-        package='robot_state_publisher',
-        executable='robot_state_publisher',
-        namespace=namespace,
-        name='robot_state_publisher',
-        output='screen',
-        parameters=[{
-            'robot_description': robot_description_content,
-            'use_sim_time': use_sim_time,
-        }],
-        remappings=[
-            ('/tf', 'tf'),
-            ('/tf_static', 'tf_static'),
-        ],
-        condition=robot_enabled,
-    ))
-
-    ld.add_action(Node(
-        package='robot_localization',
-        executable='ekf_node',
-        namespace=namespace,
-        name='robot_localization',
-        output='screen',
-        parameters=[
-            PathJoinSubstitution([config_path, localization_config]),
-            {'use_sim_time': use_sim_time},
-        ],
-        remappings=[
-            ('/tf', 'tf'),
-            ('/tf_static', 'tf_static'),
-            ('odometry/filtered', 'odom'),
-        ],
-        condition=robot_enabled,
-    ))
-
     robot_spawner = Node(
         package='ros_ign_gazebo',
         executable='create',
@@ -130,23 +94,56 @@ def add_robot(
         ],
     )
 
+    robot_actions = [
+        Node(
+            package='robot_state_publisher',
+            executable='robot_state_publisher',
+            namespace=namespace,
+            name='robot_state_publisher',
+            output='screen',
+            parameters=[{
+                'robot_description': robot_description_content,
+                'use_sim_time': use_sim_time,
+            }],
+            remappings=[
+                ('/tf', 'tf'),
+                ('/tf_static', 'tf_static'),
+            ],
+        ),
+        Node(
+            package='robot_localization',
+            executable='ekf_node',
+            namespace=namespace,
+            name='robot_localization',
+            output='screen',
+            parameters=[
+                PathJoinSubstitution([config_path, localization_config]),
+                {'use_sim_time': use_sim_time},
+            ],
+            remappings=[
+                ('/tf', 'tf'),
+                ('/tf_static', 'tf_static'),
+                ('odometry/filtered', 'odom'),
+            ],
+        ),
+        Node(
+            package='ros_ign_bridge',
+            executable='parameter_bridge',
+            namespace=namespace,
+            name='gazebo_bridge',
+            output='screen',
+            parameters=[{
+                'config_file': PathJoinSubstitution([config_path, bridge_config]),
+                'use_sim_time': use_sim_time,
+            }],
+        ),
+        robot_spawner,
+    ]
+
     # Start Gazebo first, then insert robot entities in a predictable order.
     ld.add_action(TimerAction(
         period=spawn_delay,
-        actions=[robot_spawner],
-        condition=robot_enabled,
-    ))
-
-    ld.add_action(Node(
-        package='ros_ign_bridge',
-        executable='parameter_bridge',
-        namespace=namespace,
-        name='gazebo_bridge',
-        output='screen',
-        parameters=[{
-            'config_file': PathJoinSubstitution([config_path, bridge_config]),
-            'use_sim_time': use_sim_time,
-        }],
+        actions=robot_actions,
         condition=robot_enabled,
     ))
 

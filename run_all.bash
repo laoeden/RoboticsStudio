@@ -1,0 +1,1 @@
+cd /home/lewis/RoboticsStudio && source /opt/ros/humble/setup.bash && source install/setup.bash && env LIBGL_ALWAYS_SOFTWARE=1 ros2 launch 41068_ignition_bringup 41068_ignition_husky.launch.py world:=simple_trees
