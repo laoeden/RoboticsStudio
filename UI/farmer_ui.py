@@ -2,7 +2,7 @@ import tkinter as tk
 from datetime import datetime
 
 # =========================================================
-# FARMER TACTICAL UI
+# FARMER UI
 # Fire Aware Robotic Mower for Environmental Risk
 # =========================================================
 
@@ -19,7 +19,7 @@ BORDER = "#394438"
 
 
 root = tk.Tk()
-root.title("FARMER Tactical Control Station")
+root.title("FARMER Control Station")
 root.geometry("1200x700")
 root.configure(bg=BG)
 
@@ -267,7 +267,7 @@ map_panel.grid(row=0, column=0, sticky="nsew")
 
 tk.Label(
     map_panel,
-    text="TACTICAL ENVIRONMENT DISPLAY",
+    text="ENVIRONMENT DISPLAY",
     bg=PANEL,
     fg=GREEN_BRIGHT,
     font=("DejaVu Sans Mono", 10, "bold")
