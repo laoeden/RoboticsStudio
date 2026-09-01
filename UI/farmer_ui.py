@@ -1,6 +1,10 @@
 import tkinter as tk
 from datetime import datetime
 
+import rclpy
+from rclpy.node import Node
+from std_msgs.msg import String
+
 # =========================================================
 # FARMER UI
 # Fire Aware Robotic Mower for Environmental Risk
@@ -23,6 +27,27 @@ root.title("FARMER Control Station")
 root.geometry("1200x700")
 root.configure(bg=BG)
 
+# =========================================================
+# ROS 2 SETUP
+# =========================================================
+
+rclpy.init()
+
+ros_node = Node("farmer_control_station")
+
+mission_command_pub = ros_node.create_publisher(
+    String,
+    "/mission_command",
+    10
+)
+
+
+def publish_command(command):
+    msg = String()
+    msg.data = command
+    mission_command_pub.publish(msg)
+
+    ros_node.get_logger().info(f"Published command: {command}")
 
 def timestamp():
     return datetime.now().strftime("%H:%M:%S")
@@ -34,30 +59,36 @@ def add_log(source, message):
     log.see(tk.END)
     log.config(state="disabled")
 
-
 def start_mission():
+    publish_command("START")
+
     status_value.config(text="ACTIVE", fg=GREEN_BRIGHT)
     mission_value.config(text="EXECUTING")
     add_log("SYSTEM", "MISSION STARTED")
 
 
 def stop_mission():
+    publish_command("STOP")
+
     status_value.config(text="HALTED", fg=RED)
     mission_value.config(text="STOPPED")
     add_log("SYSTEM", "MISSION STOPPED")
 
 
 def return_to_base():
+    publish_command("RETURN_TO_BASE")
+
     status_value.config(text="RTB", fg=AMBER)
     mission_value.config(text="RETURN TO BASE")
     add_log("UGV", "RETURN TO BASE COMMAND SENT")
 
 
 def emergency_stop():
+    publish_command("EMERGENCY_STOP")
+
     status_value.config(text="E-STOP", fg=RED)
     mission_value.config(text="EMERGENCY STOP")
     add_log("SYSTEM", "EMERGENCY STOP ACTIVATED")
-
 
 # =========================================================
 # HEADER
@@ -593,4 +624,14 @@ add_log("UAV", "UAV-01 READY")
 add_log("SYSTEM", "AWAITING OPERATOR COMMAND")
 
 
+def on_close():
+    ros_node.destroy_node()
+
+    if rclpy.ok():
+        rclpy.shutdown()
+
+    root.destroy()
+
+
+root.protocol("WM_DELETE_WINDOW", on_close)
 root.mainloop()
