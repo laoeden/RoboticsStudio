@@ -6,3 +6,8 @@ install/
 log/
 VS_tests/
 weights/
+
+world/WorldWithTerrian.sdf
+models/GreyHeatMap/
+
+
