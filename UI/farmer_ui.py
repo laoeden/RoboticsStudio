@@ -1,5 +1,6 @@
 import tkinter as tk
 from datetime import datetime
+import threading
 
 import rclpy
 from rclpy.node import Node
@@ -34,6 +35,19 @@ root.configure(bg=BG)
 rclpy.init()
 
 ros_node = Node("farmer_control_station")
+
+
+def ros_spin():
+    rclpy.spin(ros_node)
+
+ros_thread = threading.Thread(
+    target=ros_spin,
+    daemon=True,
+    name="ROS_THREAD"
+)
+
+ros_thread.start()
+
 
 mission_command_pub = ros_node.create_publisher(
     String,
@@ -625,13 +639,11 @@ add_log("SYSTEM", "AWAITING OPERATOR COMMAND")
 
 
 def on_close():
-    ros_node.destroy_node()
-
     if rclpy.ok():
         rclpy.shutdown()
 
+    ros_node.destroy_node()
     root.destroy()
-
 
 root.protocol("WM_DELETE_WINDOW", on_close)
 root.mainloop()
