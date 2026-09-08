@@ -26,7 +26,7 @@
     <scene>
       <ambient>1.0 1.0 1.0</ambient>
       <background>0.8 0.8 0.8</background>
-      <shadows>1</shadows>
+      <shadows>false</shadows> <!--disable shadow for less lag-->
     </scene>
 
     <!-- Initialise spherical coordinates somewhere -->
@@ -54,6 +54,7 @@
       </uri>
       <name>oak1</name>
       <pose>0 3.0 0 0 0 0</pose>
+      <static>true</static>
     </include>
     
     <!-- Pine tree -->
@@ -63,6 +64,7 @@
       </uri>
       <name>pine1</name>
       <pose>5.0 0.0 0 0 0 0</pose>
+      <static>true</static>
     </include>
 
     <!-- Rocks -->
@@ -70,6 +72,7 @@
       <uri>https://fuel.gazebosim.org/1.0/OpenRobotics/models/Falling%20Rock%201</uri>
       <name>rocks1</name>
       <pose>-3 2 1 0 0 0</pose>
+      <static>true</static>
     </include>
 
     <!-- Kangaroo -->
@@ -77,34 +80,45 @@
       <uri>model://SomeKangaroo</uri>
       <name>kangaroo</name>
       <pose>2 0 0 0 0 0</pose>
+      <static>true</static>
     </include>
 
     <!--dry grass-->
     <include>
        <uri>model://Dry_Grass</uri>
        <name>dry_grass</name>
-       <pose>0 0 0 0 0 0</pose>
+       <pose>0 -2 0 0 0 0</pose>
+       <static>true</static>
     </include>
 
-    <!--hills-->
+    <include>
+      <uri>model://Dry_Grass</uri>
+      <name>dry_grass_2</name>
+      <pose>5 8 0 0 0 0</pose>
+      <static>true</static>
+    </include>
+
+    <!--small hill-->
     <model name="hill_1">
       <static>true</static>
-      <pose>15 10 -6 0 0 0</pose>
+      <pose>0 8 -2.1 0 0 0</pose>
 
       <link name="hill_link">
         <collision name="collision">
           <geometry>
             <sphere>
-              <radius>10</radius>
+              <radius>3</radius>
             </sphere>
+
           </geometry>
         </collision>
 
         <visual name="visual">
           <geometry>
             <sphere>
-              <radius>10</radius>
+              <radius>3</radius>
             </sphere>
+
           </geometry>
 
           <material>
@@ -114,6 +128,61 @@
         </visual>
       </link>
     </model>
+
+    <!-- top of the hill. -->
+    <model name="top_of_hill">
+      <static>true</static>
+      <pose>5 8 0.3 0 0 0</pose>
+      <link name="block_link">
+        <collision name="block_collision">
+          <geometry>
+            <box><size>10 6 1</size></box>
+          </geometry>
+        </collision>
+        <visual name="block_visual">
+          <geometry>
+            <box><size>10 6 1</size></box>
+          </geometry>
+          <material>
+            <ambient>0.15 0.45 0.10 1</ambient>
+            <diffuse>0.20 0.55 0.15 1</diffuse>
+          </material>
+        </visual>
+      </link>
+    </model>
+
+    <!--big hill-->
+    <model name="hill_2">
+      <static>true</static>
+      <pose>10 8 -1.5 0 0 0</pose>
+
+      <link name="hill_link">
+        <collision name="collision">
+          <geometry>
+            <sphere>
+              <radius>3</radius>
+            </sphere>
+
+          </geometry>
+        </collision>
+
+        <visual name="visual">
+          <geometry>
+            <sphere>
+              <radius>3</radius>
+            </sphere>
+
+          </geometry>
+
+          <material>
+            <ambient>0.15 0.45 0.10 1</ambient>
+            <diffuse>0.20 0.55 0.15 1</diffuse>
+          </material>
+        </visual>
+      </link>
+    </model>
+
+
 
   </world>
 </sdf>
