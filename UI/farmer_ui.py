@@ -5,6 +5,7 @@ import threading
 import rclpy
 from rclpy.node import Node
 from std_msgs.msg import String
+from nav_msgs.msg import Odometry
 
 # =========================================================
 # FARMER UI
@@ -35,6 +36,26 @@ root.configure(bg=BG)
 rclpy.init()
 
 ros_node = Node("farmer_control_station")
+
+ugv_x = None
+ugv_y = None
+ugv_heading = None
+
+def odometry_callback(msg):
+    global ugv_x, ugv_y
+
+    ugv_x = msg.pose.pose.position.x
+    ugv_y = msg.pose.pose.position.y
+    
+odom_sub = ros_node.create_subscription(
+    Odometry,
+    "/husky1/odometry",
+    odometry_callback,
+    10
+)
+
+
+
 
 
 def ros_spin():
@@ -227,13 +248,16 @@ def info_row(parent, label, value):
         font=("DejaVu Sans Mono", 9)
     ).pack(side="left")
 
-    tk.Label(
+    value_label = tk.Label(
         row,
         text=value,
         bg=PANEL,
         fg=TEXT,
         font=("DejaVu Sans Mono", 9, "bold")
-    ).pack(side="right")
+    )
+    value_label.pack(side="right")
+
+    return value_label
 
 
 info_row(left, "BATTERY", "92%")
@@ -241,6 +265,9 @@ info_row(left, "PROGRESS", "0%")
 info_row(left, "HAZARDS", "0%")
 info_row(left, "LOCALISATION", "FIXED")
 info_row(left, "LINK", "GOOD")
+
+ugv_x_label = info_row(left, "UGV X", "-- m")
+ugv_y_label = info_row(left, "UGV Y", "-- m")
 
 
 tk.Frame(left, bg=BORDER, height=1).pack(
@@ -646,4 +673,17 @@ def on_close():
     root.destroy()
 
 root.protocol("WM_DELETE_WINDOW", on_close)
+
+def update_telemetry_ui():
+    if ugv_x is not None:
+        ugv_x_label.config(text=f"{ugv_x:.2f} m")
+
+    if ugv_y is not None:
+        ugv_y_label.config(text=f"{ugv_y:.2f} m")
+
+    root.after(100, update_telemetry_ui)
+
+
+update_telemetry_ui()
+
 root.mainloop()
