@@ -1,0 +1,14 @@
+Image size: 720 x 480 pixels
+Horizontal FOV: 2.0944 rad = 120 degrees
+
+
+fx = width / (2 * tan(horizontal_fov / 2))
+   = 207.85 pixels
+
+fy = 207.85 pixels
+cx = width / 2  = 360 pixels
+cy = height / 2 = 240 pixels
+
+
+RGB clip:   0.1 m to 40 m
+Depth clip: 0.4 m to 10 m
