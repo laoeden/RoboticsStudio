@@ -1,6 +1,7 @@
 <?xml version="1.0"?>
 <sdf version="1.8">
   <world name="TerrainWorld">
+    <gravity>0 0 -9.81</gravity>
 
     <scene>
       <ambient>0.8 0.8 0.8 1</ambient>
@@ -22,7 +23,7 @@
           <geometry>
             <heightmap>
               <uri>../models/GreyHeatMapV2/e9836408f061fe241792508fc50c1535dea7810a.png</uri>
-              <size>50 50 15</size>
+              <size>50 50 5</size>
               <pos>0 0 0</pos>
             </heightmap>
           </geometry>
@@ -32,7 +33,7 @@
           <geometry>
             <mesh>
               <uri>../models/GreyHeatMapV2/GreyMapV2Terrain.obj</uri>
-              <scale>0.5 0.5 1</scale>
+              <scale>0.5 0.5 0.333333</scale>
             </mesh>
           </geometry>
         </visual>
@@ -43,5 +44,12 @@
 </sdf>
 
 <!--cd ~/git/RoboticsStudio
-ign gazebo -v 4 --render-engine ogre world/worldterrian.sdf
+ign gazebo -v 4 world/worldterrian.sdf
+Ogre 2 is the default render engine.
+
+cd ~/git/RoboticsStudio
+source /opt/ros/humble/setup.bash
+source install/setup.bash
+
+ros2 launch 41068_ignition_bringup 41068_ignition_husky.launch.py world:=worldterrian
 -->

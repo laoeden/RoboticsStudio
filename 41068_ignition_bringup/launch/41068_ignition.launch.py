@@ -369,7 +369,11 @@ def generate_launch_description():
         localization_config='robot_localization_husky1.yaml',
         x='0.0',
         y='0.0',
-        z='0.4',
+        # Use a higher spawn point for the raised terrain.
+        z=PythonExpression([
+            "'2.0' if '", LaunchConfiguration('world'),
+            "' == 'worldterrian' else '0.4'",
+        ]),
         spawn_delay=3.0,
     )
 
