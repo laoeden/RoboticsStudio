@@ -16,62 +16,80 @@ class SpinForScan(Node):
         scan_topic: str = '/husky1/scan',
         linear_speed: float = 0.35,
         angular_speed: float = 1.0,
-        side_length: float = 5.0,
-        turn_duration: float = 1.57,
-        safe_distance: float = 1.0,
-        max_total_time: float = 60.0,
+        area_size: float = 5.0,
+        lane_spacing: float = 1.0,
+        turn_duration: float = 3.14,
+        safe_distance: float = 1.5,
+        obstacle_reverse_duration: float = 1.4,
+        obstacle_turn_duration: float = 3.14,
+        obstacle_shift_duration: float = 2.0,
+        max_total_time: float = 240.0,
     ):
         super().__init__('spin_for_scan')
         self.publisher_ = self.create_publisher(Twist, topic, 10)
         self._scan_subscription = self.create_subscription(LaserScan, scan_topic, self._on_scan, 10)
         self.linear_speed = linear_speed
         self.angular_speed = angular_speed
-        self.side_length = side_length
+        self.area_size = area_size
+        self.lane_spacing = lane_spacing
         self.turn_duration = turn_duration
         self.safe_distance = safe_distance
+        self.obstacle_reverse_duration = obstacle_reverse_duration
+        self.obstacle_turn_duration = obstacle_turn_duration
+        self.obstacle_shift_duration = obstacle_shift_duration
         self.max_total_time = max_total_time
 
         self._scan_ranges = []
+        self._scan_angle_min = 0.0
+        self._scan_angle_increment = 0.0
+        self._scan_range_min = 0.0
+        self._scan_range_max = float('inf')
+        self._scan_received = False
         self._start_time = time.monotonic()
         self._phase = 'drive'
         self._phase_start = self._start_time
-        self._turn_count = 0
-        self._drive_sign = 1.0
-        self._turn_sign = 1.0
-        self._reverse_distance = 0.5
-        self._obstacle_stop_time = 0.0
-        self._turn_after_obstacle = False
-        self._avoid_turn_dir = 5.0
+        self._lane_index = 0
+        self._lane_count = max(1, int(math.floor(area_size / lane_spacing)) + 1)
+        self._lane_turn_dir = 1.0
+        self._avoid_turn_dir = 1.0
+        self._resume_phase = 'drive'
         self._timer = self.create_timer(0.05, self._publish_motion)
 
     def _on_scan(self, msg: LaserScan) -> None:
-        ranges = [float(v) for v in msg.ranges if math.isfinite(v)]
-        self._scan_ranges = ranges
+        self._scan_ranges = [float(v) for v in msg.ranges]
+        self._scan_angle_min = float(msg.angle_min)
+        self._scan_angle_increment = float(msg.angle_increment)
+        self._scan_range_min = float(msg.range_min)
+        self._scan_range_max = float(msg.range_max) if msg.range_max > 0.0 else float('inf')
+        self._scan_received = True
+
+    def _sector_clearance(self, minimum_angle: float, maximum_angle: float) -> float:
+        if not self._scan_received or not self._scan_ranges:
+            return float('inf')
+
+        values = []
+        for index, value in enumerate(self._scan_ranges):
+            angle = self._scan_angle_min + index * self._scan_angle_increment
+            if (
+                minimum_angle <= angle <= maximum_angle
+                and math.isfinite(value)
+                and self._scan_range_min <= value <= self._scan_range_max
+            ):
+                values.append(value)
+        return min(values) if values else float('inf')
 
     def _front_clearance(self) -> float:
-        if not self._scan_ranges:
-            return float('inf')
-
-        center_index = len(self._scan_ranges) // 2
-        window = self._scan_ranges[max(0, center_index - 15): min(len(self._scan_ranges), center_index + 16)]
-        if not window:
-            return float('inf')
-        return min(window)
+        return self._sector_clearance(math.radians(-45.0), math.radians(45.0))
 
     def _side_clearance(self) -> tuple[float, float]:
-        if not self._scan_ranges:
-            return float('inf'), float('inf')
-
-        n = len(self._scan_ranges)
-        left_window = self._scan_ranges[: max(1, n // 3)]
-        right_window = self._scan_ranges[min(n, 2 * n // 3):]
-        left_clearance = min(left_window) if left_window else float('inf')
-        right_clearance = min(right_window) if right_window else float('inf')
-        return left_clearance, right_clearance
+        left = self._sector_clearance(math.radians(35.0), math.radians(145.0))
+        right = self._sector_clearance(math.radians(-145.0), math.radians(-35.0))
+        return left, right
 
     def _start_avoidance(self, now: float) -> None:
         left_clearance, right_clearance = self._side_clearance()
         self._avoid_turn_dir = 1.0 if left_clearance >= right_clearance else -1.0
+        self._resume_phase = self._phase
         self._phase = 'avoid_reverse'
         self._phase_start = now
         self.get_logger().warning(
@@ -86,55 +104,81 @@ class SpinForScan(Node):
             return
 
         msg = Twist()
-        front_clearance = self._front_clearance()
-
-        if self._phase in {'avoid_reverse', 'avoid_turn'}:
-            if self._phase == 'avoid_reverse':
-                msg.linear.x = -0.25
-                if now - self._phase_start >= 0.8:
-                    self._phase = 'avoid_turn'
-                    self._phase_start = now
-            elif self._phase == 'avoid_turn':
-                msg.angular.z = self.angular_speed * self._avoid_turn_dir
-                if now - self._phase_start >= 1.1:
-                    self._phase = 'drive'
-                    self._phase_start = now
-                    self.get_logger().info('Obstacle avoidance complete; resuming patrol.')
+        if not self._scan_received:
             self.publisher_.publish(msg)
             return
 
-        if front_clearance < self.safe_distance:
+        front_clearance = self._front_clearance()
+
+        if self._phase == 'avoid_reverse':
+            msg.linear.x = -0.30
+            if now - self._phase_start >= self.obstacle_reverse_duration:
+                self._phase = 'avoid_turn_out'
+                self._phase_start = now
+        elif self._phase == 'avoid_turn_out':
+            msg.angular.z = self.angular_speed * self._avoid_turn_dir
+            if now - self._phase_start >= self.obstacle_turn_duration:
+                self._phase = 'avoid_shift'
+                self._phase_start = now
+        elif self._phase == 'avoid_shift':
+            msg.linear.x = self.linear_speed
+            if now - self._phase_start >= self.obstacle_shift_duration:
+                self._phase = 'avoid_turn_back'
+                self._phase_start = now
+        elif self._phase == 'avoid_turn_back':
+            msg.angular.z = -self.angular_speed * self._avoid_turn_dir
+            if now - self._phase_start >= self.obstacle_turn_duration:
+                self._phase = self._resume_phase
+                self._phase_start = now
+                self.get_logger().info('Obstacle bypass complete; resuming lawn-mower coverage.')
+
+        if self._phase.startswith('avoid_'):
+            self.publisher_.publish(msg)
+            return
+
+        elif self._phase in {'drive', 'shift'} and front_clearance < self.safe_distance:
             self._start_avoidance(now)
             self.publisher_.publish(msg)
             return
 
+        if front_clearance < self.safe_distance:
+            self.publisher_.publish(msg)
+            return
+
         phase_time = now - self._phase_start
-        drive_duration = self.side_length / max(self.linear_speed, 0.05)
-        reverse_duration = self._reverse_distance / max(self.linear_speed, 0.05)
+        drive_duration = self.area_size / max(self.linear_speed, 0.05)
+        shift_duration = self.lane_spacing / max(self.linear_speed, 0.05)
 
         if self._phase == 'drive':
-            msg.linear.x = self.linear_speed * self._drive_sign
+            msg.linear.x = self.linear_speed
             if phase_time >= drive_duration:
-                self._phase = 'reverse'
+                if self._lane_index >= self._lane_count - 1:
+                    self._stop_and_exit(f'{self.area_size:g} m lawn-mower scan complete.')
+                    return
+                self._lane_turn_dir = 1.0 if self._lane_index % 2 == 0 else -1.0
+                self._phase = 'turn_to_shift'
                 self._phase_start = now
-                self.get_logger().info('Drive leg complete; reversing 0.5 m before turning.')
-
-        elif self._phase == 'reverse':
-            msg.linear.x = -self.linear_speed * 0.8
-            if phase_time >= reverse_duration:
-                self._phase = 'turn'
-                self._phase_start = now
-                self._turn_count += 1
-                self.get_logger().info(f'Reverse complete {self._turn_count}; turning 90 degrees.')
-
-        elif self._phase == 'turn':
-            msg.angular.z = self.angular_speed * self._turn_sign
+                self.get_logger().info(
+                    f'Lane {self._lane_index + 1} complete; turning '
+                    f'{"left" if self._lane_turn_dir > 0 else "right"} toward next strip.'
+                )
+        elif self._phase == 'turn_to_shift':
+            msg.angular.z = self.angular_speed * self._lane_turn_dir
             if phase_time >= self.turn_duration:
-                self._turn_sign *= -1.0
-                self._drive_sign *= -1.0
+                self._phase = 'shift'
+                self._phase_start = now
+        elif self._phase == 'shift':
+            msg.linear.x = self.linear_speed
+            if phase_time >= shift_duration:
+                self._phase = 'turn_to_next_lane'
+                self._phase_start = now
+        elif self._phase == 'turn_to_next_lane':
+            msg.angular.z = self.angular_speed * self._lane_turn_dir
+            if phase_time >= self.turn_duration:
+                self._lane_index += 1
                 self._phase = 'drive'
                 self._phase_start = now
-                self.get_logger().info(f'Finished turn {self._turn_count}; starting next square leg.')
+                self.get_logger().info(f'Starting lawn-mower lane {self._lane_index + 1}.')
 
         self.publisher_.publish(msg)
 

@@ -16,7 +16,11 @@ install(
 )
 
 install(
-  PROGRAMS scripts/dynamic_world_demo.py scripts/basic_autonomy_demo.py
+  PROGRAMS
+    scripts/dynamic_world_demo.py
+    scripts/basic_autonomy_demo.py
+    ${CMAKE_CURRENT_SOURCE_DIR}/../lidar_3d_plot.py
+    ${CMAKE_CURRENT_SOURCE_DIR}/../voxel_nav_explorer.py
   DESTINATION lib/${PROJECT_NAME}
 )
 

@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+set -e
+
+cd /home/lewis/RoboticsStudio
+source /opt/ros/humble/setup.bash
+source install/setup.bash
+
+env \
+  MESA_D3D12_DEFAULT_ADAPTER_NAME=NVIDIA \
+  LIBGL_ALWAYS_SOFTWARE=0 \
+  ros2 launch 41068_ignition_bringup \
+    41068_ignition_parrot.launch.py \
+    world:=simple_trees \
+    render_engine:=ogre

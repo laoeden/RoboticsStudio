@@ -45,7 +45,9 @@ class Lidar3DPlotter(Node):
         self._max_local_radius = 5.0
         self._robot_x = 0.0
         self._robot_y = 0.0
+        self._robot_z = 0.0
         self._robot_yaw = 0.0
+        self._robot_rotation = np.eye(3, dtype=np.float32)
         self._voxel_map: dict[tuple[int, int, int], int] = {}
         self._scan_cache = ScanCache(points=np.empty((0, 3), dtype=np.float32), stamp=0.0)
         self._cloud_cache = CloudCache(
@@ -64,38 +66,40 @@ class Lidar3DPlotter(Node):
         pose = msg.pose.pose
         self._robot_x = float(pose.position.x)
         self._robot_y = float(pose.position.y)
+        self._robot_z = float(pose.position.z)
         qx = pose.orientation.x
         qy = pose.orientation.y
         qz = pose.orientation.z
         qw = pose.orientation.w
+        quaternion_norm = float(np.sqrt(qx * qx + qy * qy + qz * qz + qw * qw))
+        if quaternion_norm > 1e-6:
+            qx /= quaternion_norm
+            qy /= quaternion_norm
+            qz /= quaternion_norm
+            qw /= quaternion_norm
+        self._robot_rotation = np.array(
+            [
+                [1.0 - 2.0 * (qy * qy + qz * qz), 2.0 * (qx * qy - qz * qw), 2.0 * (qx * qz + qy * qw)],
+                [2.0 * (qx * qy + qz * qw), 1.0 - 2.0 * (qx * qx + qz * qz), 2.0 * (qy * qz - qx * qw)],
+                [2.0 * (qx * qz - qy * qw), 2.0 * (qy * qz + qx * qw), 1.0 - 2.0 * (qx * qx + qy * qy)],
+            ],
+            dtype=np.float32,
+        )
         self._robot_yaw = float(np.arctan2(2.0 * (qw * qz + qx * qy), 1.0 - 2.0 * (qy * qy + qz * qz)))
 
     def _transform_points_to_world(self, points: np.ndarray) -> np.ndarray:
         if points.size == 0:
             return points.copy()
 
-        cos_yaw = np.cos(self._robot_yaw)
-        sin_yaw = np.sin(self._robot_yaw)
-        x = points[:, 0]
-        y = points[:, 1]
-        z = points[:, 2]
-
-        world_x = x * cos_yaw - y * sin_yaw + self._robot_x
-        world_y = x * sin_yaw + y * cos_yaw + self._robot_y
-        return np.column_stack((world_x, world_y, z)).astype(np.float32)
+        translation = np.array([self._robot_x, self._robot_y, self._robot_z], dtype=np.float32)
+        return (points @ self._robot_rotation.T + translation).astype(np.float32)
 
     def _transform_world_to_local(self, points: np.ndarray) -> np.ndarray:
         if points.size == 0:
             return points.copy()
 
-        centered = points - np.array([self._robot_x, self._robot_y, 0.0], dtype=np.float32)
-        cos_yaw = np.cos(-self._robot_yaw)
-        sin_yaw = np.sin(-self._robot_yaw)
-        x = centered[:, 0]
-        y = centered[:, 1]
-        local_x = x * cos_yaw - y * sin_yaw
-        local_y = x * sin_yaw + y * cos_yaw
-        return np.column_stack((local_x, local_y, centered[:, 2])).astype(np.float32)
+        centered = points - np.array([self._robot_x, self._robot_y, self._robot_z], dtype=np.float32)
+        return (centered @ self._robot_rotation).astype(np.float32)
 
     def _on_scan(self, msg: LaserScan) -> None:
         angles = msg.angle_min + np.arange(len(msg.ranges), dtype=np.float32) * msg.angle_increment
@@ -365,18 +369,31 @@ def main() -> None:
 
     plt.ion()
     figure = plt.figure(figsize=(10, 8))
+    figure.patch.set_facecolor('#171717')
     axis = figure.add_subplot(111, projection='3d')
+    axis.set_facecolor('#242424')
     axis.set_title('RGB-D + LiDAR Planar Voxel Map')
     axis.set_xlabel('X (m)')
     axis.set_ylabel('Y (m)')
     axis.set_zlabel('Z (m)')
+    axis.title.set_color('white')
+    axis.xaxis.label.set_color('white')
+    axis.yaxis.label.set_color('white')
+    axis.zaxis.label.set_color('white')
+    axis.tick_params(colors='white')
+    axis.grid(True, color='#555555', alpha=0.45)
+    axis.xaxis.pane.set_facecolor('#242424')
+    axis.yaxis.pane.set_facecolor('#242424')
+    axis.zaxis.pane.set_facecolor('#242424')
     axis.set_zlim(-2.0, 2.0)
 
     floor_surface = None
     object_scatter = None
-    object_scatter = axis.scatter([], [], [], s=20, cmap='turbo', alpha=0.8, label='Object voxels')
+    object_scatter = axis.scatter([], [], [], s=20, cmap='magma_r', alpha=0.8, label='Object voxels')
     colorbar = figure.colorbar(object_scatter, ax=axis, shrink=0.7, pad=0.1)
-    colorbar.set_label('Object voxel density')
+    colorbar.set_label('Distance from robot (m)')
+    colorbar.ax.yaxis.label.set_color('white')
+    colorbar.ax.tick_params(colors='white')
     axis.legend(loc='upper right')
 
     try:
@@ -417,21 +434,22 @@ def main() -> None:
 
                 object_mask = ~floor_mask
                 if np.any(object_mask):
+                    object_distances = np.linalg.norm(voxel_centers[object_mask], axis=1)
                     object_scatter = axis.scatter(
                         voxel_centers[object_mask, 0],
                         voxel_centers[object_mask, 1],
                         voxel_centers[object_mask, 2],
                         s=20,
-                        c=voxel_density[object_mask],
-                        cmap='turbo',
+                        c=object_distances,
+                        cmap='magma_r',
                         alpha=0.8,
                     )
                     colorbar.update_normal(object_scatter)
                 else:
-                    object_scatter = axis.scatter([], [], [], s=20, cmap='turbo', alpha=0.8)
+                    object_scatter = axis.scatter([], [], [], s=20, cmap='magma_r', alpha=0.8)
                     colorbar.update_normal(object_scatter)
             else:
-                object_scatter = axis.scatter([], [], [], s=20, cmap='turbo', alpha=0.8)
+                object_scatter = axis.scatter([], [], [], s=20, cmap='magma_r', alpha=0.8)
                 colorbar.update_normal(object_scatter)
 
             axis.set_xlim(-5.0, 5.0)

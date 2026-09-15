@@ -279,6 +279,14 @@ def generate_launch_description():
     )
     ld.add_action(world_launch_arg)
 
+    render_engine_launch_arg = DeclareLaunchArgument(
+        'render_engine',
+        default_value='ogre2',
+        description='Gazebo rendering backend',
+        choices=['ogre', 'ogre2'],
+    )
+    ld.add_action(render_engine_launch_arg)
+
     world_dir_launch_arg = DeclareLaunchArgument(
         'world_dir',
         default_value=workspace_world_path,
@@ -328,6 +336,8 @@ def generate_launch_description():
                     LaunchConfiguration('world_dir'),
                     [LaunchConfiguration('world'), '.sdf'],
                 ]),
+                ' --render-engine ',
+                LaunchConfiguration('render_engine'),
                 ' -r',
             ]
         }.items(),
