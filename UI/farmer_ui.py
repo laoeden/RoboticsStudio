@@ -7,6 +7,8 @@ from rclpy.node import Node
 from std_msgs.msg import String
 from nav_msgs.msg import Odometry
 
+from geometry_msgs.msg import PointStamped
+
 # =========================================================
 # FARMER UI
 # Fire Aware Robotic Mower for Environmental Risk
@@ -76,6 +78,12 @@ mission_command_pub = ros_node.create_publisher(
     10
 )
 
+drone_goal_pub = ros_node.create_publisher(
+    PointStamped,
+    "/parrot1/goal",
+    10
+)
+
 
 def publish_command(command):
     msg = String()
@@ -83,6 +91,27 @@ def publish_command(command):
     mission_command_pub.publish(msg)
 
     ros_node.get_logger().info(f"Published command: {command}")
+
+def send_drone_goal():
+    try:
+        x = float(drone_x_entry.get())
+        y = float(drone_y_entry.get())
+        z = float(drone_z_entry.get())
+    except ValueError:
+        ros_node.get_logger().error("Drone coordinates must be numbers")
+        return
+
+    msg = PointStamped()
+    msg.header.frame_id = "parrot1_odom"
+    msg.point.x = x
+    msg.point.y = y
+    msg.point.z = z
+
+    drone_goal_pub.publish(msg)
+
+    ros_node.get_logger().info(
+        f"Sent drone goal: ({x}, {y}, {z})"
+    )
 
 def timestamp():
     return datetime.now().strftime("%H:%M:%S")
@@ -317,6 +346,34 @@ tactical_button("[ STOP ]", stop_mission, AMBER)
 tactical_button("[ RETURN TO BASE ]", return_to_base)
 tactical_button("[ EMERGENCY STOP ]", emergency_stop, RED)
 
+drone_target_frame = tk.Frame(left, bg=PANEL)
+drone_target_frame.pack(fill="x", padx=15, pady=10)
+
+tk.Label(
+    drone_target_frame,
+    text="DRONE TARGET",
+    bg=PANEL,
+    fg=TEXT,
+    font=("DejaVu Sans Mono", 10, "bold")
+).pack(anchor="w", pady=(0, 5))
+
+drone_x_entry = tk.Entry(drone_target_frame, width=7)
+drone_x_entry.pack(side="left", padx=2)
+drone_x_entry.insert(0, "0")
+
+drone_y_entry = tk.Entry(drone_target_frame, width=7)
+drone_y_entry.pack(side="left", padx=2)
+drone_y_entry.insert(0, "0")
+
+drone_z_entry = tk.Entry(drone_target_frame, width=7)
+drone_z_entry.pack(side="left", padx=2)
+drone_z_entry.insert(0, "2")
+
+tk.Button(
+    drone_target_frame,
+    text="SEND GOAL",
+    command=send_drone_goal
+).pack(side="left", padx=5)
 
 # =========================================================
 # CENTER PANEL
