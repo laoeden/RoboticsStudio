@@ -6,6 +6,10 @@ import rclpy
 from rclpy.node import Node
 from std_msgs.msg import String
 from nav_msgs.msg import Odometry
+from sensor_msgs.msg import Image as RosImage
+from cv_bridge import CvBridge
+import cv2
+from PIL import Image as PILImage, ImageTk
 
 from geometry_msgs.msg import PointStamped
 
@@ -28,7 +32,7 @@ BORDER = "#394438"
 
 root = tk.Tk()
 root.title("FARMER Control Station")
-root.geometry("1200x700")
+root.geometry("1600x850")
 root.configure(bg=BG)
 
 # =========================================================
@@ -38,6 +42,9 @@ root.configure(bg=BG)
 rclpy.init()
 
 ros_node = Node("farmer_control_station")
+bridge = CvBridge()
+latest_rgb = None
+rgb_frame_count = 0
 
 ugv_x = None
 ugv_y = None
@@ -53,6 +60,24 @@ odom_sub = ros_node.create_subscription(
     Odometry,
     "/husky1/odometry",
     odometry_callback,
+    10
+)
+
+
+def rgb_callback(msg):
+    global latest_rgb, rgb_frame_count
+
+    try:
+        latest_rgb = bridge.imgmsg_to_cv2(msg, desired_encoding="bgr8")
+        rgb_frame_count += 1
+    except Exception as error:
+        ros_node.get_logger().error(f"RGB image conversion failed: {error}")
+
+
+rgb_sub = ros_node.create_subscription(
+    RosImage,
+    "/parrot1/camera/image",
+    rgb_callback,
     10
 )
 
@@ -384,6 +409,7 @@ center.grid(row=0, column=1, sticky="nsew", padx=5)
 
 center.grid_rowconfigure(0, weight=1)
 center.grid_columnconfigure(0, weight=1)
+center.grid_columnconfigure(1, weight=1)
 
 
 map_panel = tk.Frame(
@@ -409,6 +435,34 @@ canvas = tk.Canvas(
     highlightthickness=0
 )
 canvas.pack(fill="both", expand=True, padx=6, pady=(0, 6))
+
+
+camera_panel = tk.Frame(
+    center,
+    bg=PANEL,
+    highlightbackground=BORDER,
+    highlightthickness=1
+)
+camera_panel.grid(row=0, column=1, sticky="nsew", padx=(8, 0))
+
+tk.Label(
+    camera_panel,
+    text="PARROT RGB CAMERA",
+    bg=PANEL,
+    fg=GREEN_BRIGHT,
+    font=("DejaVu Sans Mono", 10, "bold")
+).pack(anchor="w", padx=12, pady=8)
+
+rgb_camera_label = tk.Label(
+    camera_panel,
+    text="RGB FEED WAITING",
+    bg="#050805",
+    fg=TEXT_DIM,
+    font=("DejaVu Sans Mono", 10),
+    width=52,
+    height=24
+)
+rgb_camera_label.pack(fill="both", expand=True, padx=8, pady=(0, 8))
 
 
 # Grid
@@ -737,6 +791,24 @@ def update_telemetry_ui():
 
     if ugv_y is not None:
         ugv_y_label.config(text=f"{ugv_y:.2f} m")
+
+    rendered_rgb = False
+    if latest_rgb is not None:
+        try:
+            rgb_image = cv2.cvtColor(latest_rgb, cv2.COLOR_BGR2RGB)
+            rgb_image = PILImage.fromarray(rgb_image)
+            rgb_image.thumbnail((620, 500), PILImage.LANCZOS)
+            rgb_photo = ImageTk.PhotoImage(image=rgb_image)
+            rgb_camera_label.config(image=rgb_photo, text="")
+            rgb_camera_label.image = rgb_photo
+            rendered_rgb = True
+        except Exception as error:
+            rgb_camera_label.config(text=f"RGB DISPLAY ERROR\n{error}")
+
+    if rgb_frame_count == 0:
+        rgb_camera_label.config(text="RGB FEED WAITING")
+    elif not rendered_rgb:
+        rgb_camera_label.config(text="RGB DISPLAY ERROR")
 
     root.after(100, update_telemetry_ui)
 
