@@ -50,6 +50,9 @@ ugv_x = None
 ugv_y = None
 ugv_heading = None
 
+uav_x = None
+uav_y = None
+
 def odometry_callback(msg):
     global ugv_x, ugv_y
 
@@ -60,6 +63,20 @@ odom_sub = ros_node.create_subscription(
     Odometry,
     "/husky1/odometry",
     odometry_callback,
+    10
+)
+
+def drone_odometry_callback(msg):
+    global uav_x, uav_y
+
+    uav_x = msg.pose.pose.position.x
+    uav_y = msg.pose.pose.position.y
+
+
+drone_odom_sub = ros_node.create_subscription(
+    Odometry,
+    "/parrot1/odometry",
+    drone_odometry_callback,
     10
 )
 
@@ -493,45 +510,15 @@ canvas.create_polygon(
     dash=(8, 5)
 )
 
-
-# Route
-canvas.create_line(
-    150, 450,
-    250, 380,
-    350, 340,
-    450, 300,
-    550, 230,
-    fill=GREEN_BRIGHT,
-    width=2,
-    dash=(6, 4)
-)
-
-
-# Base
-canvas.create_rectangle(
-    125, 425,
-    155, 455,
-    fill=GREEN,
-    outline=GREEN_BRIGHT
-)
-
-canvas.create_text(
-    140, 475,
-    text="BASE",
-    fill=TEXT,
-    font=("DejaVu Sans Mono", 8)
-)
-
-
 # UGV
-canvas.create_oval(
+ugv_marker = canvas.create_oval(
     390, 300,
     420, 330,
     fill=GREEN_BRIGHT,
     outline=TEXT
 )
 
-canvas.create_text(
+ugv_marker_label = canvas.create_text(
     405, 350,
     text="UGV-01",
     fill=TEXT,
@@ -540,7 +527,7 @@ canvas.create_text(
 
 
 # UAV
-canvas.create_polygon(
+uav_marker = canvas.create_polygon(
     530, 160,
     540, 170,
     530, 180,
@@ -549,13 +536,23 @@ canvas.create_polygon(
     outline=GREEN
 )
 
-canvas.create_text(
+uav_marker_label = canvas.create_text(
     530, 195,
     text="UAV-01",
     fill=TEXT,
     font=("DejaVu Sans Mono", 9)
 )
 
+# Convert ROS world coordinates to environment display coordinates
+MAP_ORIGIN_X = 405
+MAP_ORIGIN_Y = 315
+MAP_SCALE = 25
+
+def world_to_map(x, y):
+    map_x = MAP_ORIGIN_X + (x * MAP_SCALE)
+    map_y = MAP_ORIGIN_Y - (y * MAP_SCALE)
+
+    return map_x, map_y
 
 # Hazards
 hazards = [
@@ -792,18 +789,56 @@ def update_telemetry_ui():
     if ugv_y is not None:
         ugv_y_label.config(text=f"{ugv_y:.2f} m")
 
+    # Move UGV marker
+    if ugv_x is not None and ugv_y is not None:
+        map_x, map_y = world_to_map(ugv_x, ugv_y)
+
+        canvas.coords(
+            ugv_marker,
+            map_x - 15, map_y - 15,
+            map_x + 15, map_y + 15
+        )
+
+        canvas.coords(
+            ugv_marker_label,
+            map_x, map_y + 35
+        )
+
+    # Move UAV marker
+    if uav_x is not None and uav_y is not None:
+        map_x, map_y = world_to_map(uav_x, uav_y)
+
+        canvas.coords(
+            uav_marker,
+            map_x, map_y - 10,
+            map_x + 10, map_y,
+            map_x, map_y + 10,
+            map_x - 10, map_y
+        )
+
+        canvas.coords(
+            uav_marker_label,
+            map_x, map_y + 25
+        )
+
+    # Update RGB camera
     rendered_rgb = False
+
     if latest_rgb is not None:
         try:
             rgb_image = cv2.cvtColor(latest_rgb, cv2.COLOR_BGR2RGB)
             rgb_image = PILImage.fromarray(rgb_image)
             rgb_image.thumbnail((620, 500), PILImage.LANCZOS)
             rgb_photo = ImageTk.PhotoImage(image=rgb_image)
+
             rgb_camera_label.config(image=rgb_photo, text="")
             rgb_camera_label.image = rgb_photo
             rendered_rgb = True
+
         except Exception as error:
-            rgb_camera_label.config(text=f"RGB DISPLAY ERROR\n{error}")
+            rgb_camera_label.config(
+                text=f"RGB DISPLAY ERROR\n{error}"
+            )
 
     if rgb_frame_count == 0:
         rgb_camera_label.config(text="RGB FEED WAITING")
