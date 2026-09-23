@@ -391,7 +391,7 @@ def generate_launch_description():
         localization_config='robot_localization_parrot1.yaml',
         x='2.0',
         y='0.0',
-        z='0.8',
+        z='3.0',
         spawn_delay=6.0,
     )
 

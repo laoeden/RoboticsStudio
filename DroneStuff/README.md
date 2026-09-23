@@ -45,6 +45,20 @@ The controller reports acceptance and `Arrived` in its terminal. After arrival,
 send another coordinate, for example `python3 send_goal.py 5 2 3`.
 The sender reports delivery only, not acceptance or arrival.
 
+To run a named sequence, use `sequence_goals.py`. Waypoints are absolute
+positions and are sent in the order they appear:
+
+```bash
+python3 sequence_goals.py \
+  --waypoint takeoff 2 0 2 \
+  --waypoint travel 6 2 2 \
+  --waypoint landing 6 2 0.8
+```
+
+The script waits for each waypoint to be reached before publishing the next
+one. Use `--tolerance` and `--timeout` to adjust arrival distance and the
+maximum time allowed for each movement.
+
 ## Behaviour and tuning
 
 - Speed decreases with distance and is capped at 1 m/s; arrival tolerance is 0.15 m.

@@ -26,15 +26,20 @@ DRONE_PID=$!
 
 sleep 2
 
-# 3. Start FARMER control station
+# 3. Start camera risk detector
+python3 DroneStuff/camera_risk.py &
+
+CAMERA_RISK_PID=$!
+
+# 4. Start FARMER control station
 python3 UI/farmer_ui.py &
 
 UI_PID=$!
 
 echo "FARMER launched."
 echo "Gazebo PID: $SIM_PID"
-echo
- "Drone controller PID: $DRONE_PID"
+echo "Drone controller PID: $DRONE_PID"
+echo "Camera risk PID: $CAMERA_RISK_PID"
 echo "UI PID: $UI_PID"
 
 # Keep launcher alive
