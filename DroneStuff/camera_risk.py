@@ -4,6 +4,7 @@ import cv2
 import math
 import numpy as np
 
+from geometry_msgs.msg import PointStamped
 import rclpy
 from nav_msgs.msg import Odometry
 from rclpy.node import Node
@@ -16,6 +17,7 @@ FY = 207.85
 CX = 360.0
 CY = 240.0
 MIN_CONTOUR_AREA = 100.0
+MIN_OBJECT_AREA_M2 = 1.0
 MIN_DEPTH_M = 0.4
 MAX_DEPTH_M = 10.0
 
@@ -165,6 +167,11 @@ def find_objects(
 		point = None
 		if valid_depth.size > 0:
 			depth_m = float(np.median(valid_depth))
+			projected_area_m2 = (
+				cv2.contourArea(contour) * depth_m ** 2 / (FX * FY)
+			)
+			if projected_area_m2 < MIN_OBJECT_AREA_M2:
+				continue
 			point = np.array([
 				(center[0] - CX) * depth_m / FX,
 				(center[1] - CY) * depth_m / FY,
@@ -172,6 +179,40 @@ def find_objects(
 			])
 		objects.append((contour, (x, y, width, height), center, point))
 	return objects
+
+
+def find_world_points(
+	image: np.ndarray,
+	depth: np.ndarray | None,
+	window_name: str,
+	odom: Odometry | None,
+) -> list[np.ndarray]:
+	if depth is None or odom is None:
+		return []
+	if image.ndim == 2:
+		image = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
+	mask = build_mask(image, window_name)
+	quaternion = np.array([
+		odom.pose.pose.orientation.x,
+		odom.pose.pose.orientation.y,
+		odom.pose.pose.orientation.z,
+		odom.pose.pose.orientation.w,
+	])
+	objects = find_objects(mask, depth)
+	world_points = []
+	for _, _, _, camera_point in objects:
+		if camera_point is None:
+			continue
+		base_point = camera_to_base(camera_point)
+		world_points.append(
+			rotate_by_quaternion(base_point, quaternion)
+			+ np.array([
+				odom.pose.pose.position.x,
+				odom.pose.pose.position.y,
+				odom.pose.pose.position.z,
+			])
+		)
+	return world_points
 
 
 def build_display(
@@ -248,9 +289,25 @@ class HuskyCameraViewer(Node):
 		self.declare_parameter('image_topic', '/parrot1/camera/image')
 		self.declare_parameter('depth_topic', '/parrot1/camera/depth/image')
 		self.declare_parameter('odom_topic', '/parrot1/odometry')
+		self.declare_parameter('husky_goal_topic', '/husky1/goal')
+		self.declare_parameter('husky_odom_topic', '/husky1/odometry')
+		self.declare_parameter('husky_goal_frame', 'husky1_odom')
+		self.declare_parameter('duplicate_radius', 0.5)
+		self.declare_parameter('husky_goal_tolerance', 0.2)
 		self.window_name = 'Husky camera'
 		self.depth_image = None
 		self.odom = None
+		self.husky_goal_frame = self.get_parameter('husky_goal_frame').value
+		self.duplicate_radius = float(self.get_parameter('duplicate_radius').value)
+		self.husky_goal_tolerance = float(
+			self.get_parameter('husky_goal_tolerance').value
+		)
+		if self.duplicate_radius <= 0 or self.husky_goal_tolerance <= 0:
+			raise ValueError('duplicate_radius and husky_goal_tolerance must be positive')
+		self.published_locations: list[np.ndarray] = []
+		self.pending_locations: list[np.ndarray] = []
+		self.active_location: np.ndarray | None = None
+		self.husky_odom = None
 		self.subscription = self.create_subscription(
 			Image,
 			self.get_parameter('image_topic').value,
@@ -269,6 +326,17 @@ class HuskyCameraViewer(Node):
 			self.odom_callback,
 			10,
 		)
+		self.husky_goal_publisher = self.create_publisher(
+			PointStamped,
+			self.get_parameter('husky_goal_topic').value,
+			10,
+		)
+		self.husky_odom_subscription = self.create_subscription(
+			Odometry,
+			self.get_parameter('husky_odom_topic').value,
+			self.husky_odom_callback,
+			10,
+		)
 		self.get_logger().info(
 			f'Subscribed to {self.get_parameter("image_topic").value}. '
 			'Press q or Escape in the camera window to quit.'
@@ -284,6 +352,22 @@ class HuskyCameraViewer(Node):
 	def odom_callback(self, message: Odometry) -> None:
 		self.odom = message
 
+	def husky_odom_callback(self, message: Odometry) -> None:
+		self.husky_odom = message
+		if self.active_location is None:
+			return
+		position = message.pose.pose.position
+		distance = math.hypot(
+			position.x - self.active_location[0],
+			position.y - self.active_location[1],
+		)
+		if distance <= self.husky_goal_tolerance:
+			self.get_logger().info(
+				f'Husky reached contour goal ({distance:.2f} m away).'
+			)
+			self.active_location = None
+			self.publish_next_husky_goal()
+
 	def image_callback(self, message: Image) -> None:
 		try:
 			image = self._image_from_message(message)
@@ -291,6 +375,7 @@ class HuskyCameraViewer(Node):
 			self.get_logger().error(str(error), throttle_duration_sec=2.0)
 			return
 
+		self.publish_new_locations(image)
 		cv2.imshow(
 			self.window_name,
 			build_display(image, self.depth_image, self.window_name, self.odom),
@@ -298,6 +383,43 @@ class HuskyCameraViewer(Node):
 		key = cv2.waitKey(1) & 0xFF
 		if key in (ord('q'), 27):
 			rclpy.shutdown()
+
+	def publish_new_locations(self, image: np.ndarray) -> None:
+		for world_point in find_world_points(
+			image,
+			self.depth_image,
+			self.window_name,
+			self.odom,
+		):
+			if any(
+				np.linalg.norm(world_point - old_point) < self.duplicate_radius
+				for old_point in self.published_locations
+			):
+				continue
+			self.published_locations.append(world_point.copy())
+			self.get_logger().info(
+				'Queued new Husky contour goal at '
+				f'({world_point[0]:.2f}, {world_point[1]:.2f}).'
+			)
+			self.pending_locations.append(world_point.copy())
+		self.publish_next_husky_goal()
+
+	def publish_next_husky_goal(self) -> None:
+		if self.active_location is not None or not self.pending_locations:
+			return
+		self.active_location = self.pending_locations.pop(0)
+		goal = PointStamped()
+		goal.header.frame_id = self.husky_goal_frame
+		goal.point.x = float(self.active_location[0])
+		goal.point.y = float(self.active_location[1])
+		goal.point.z = 0.0
+		self.husky_goal_publisher.publish(goal)
+		self.get_logger().info(
+			'Published Husky contour goal at '
+			f'({goal.point.x:.2f}, {goal.point.y:.2f}) '
+			f'in {goal.header.frame_id}; '
+			f'{len(self.pending_locations)} queued.'
+		)
 
 	@staticmethod
 	def _image_from_message(message: Image) -> np.ndarray:

@@ -24,6 +24,11 @@ python3 DroneStuff/DroneMotion.py &
 
 DRONE_PID=$!
 
+# Start Husky coordinate controller
+python3 HuskyScripts/HuskyMotion.py &
+
+HUSKY_PID=$!
+
 sleep 2
 
 # 3. Start camera risk detector
@@ -36,9 +41,18 @@ python3 UI/farmer_ui.py &
 
 UI_PID=$!
 
+cleanup() {
+	trap - INT TERM EXIT
+	kill "$UI_PID" "$CAMERA_RISK_PID" "$HUSKY_PID" "$DRONE_PID" "$SIM_PID" 2>/dev/null || true
+	wait 2>/dev/null || true
+}
+
+trap cleanup INT TERM EXIT
+
 echo "FARMER launched."
 echo "Gazebo PID: $SIM_PID"
 echo "Drone controller PID: $DRONE_PID"
+echo "Husky controller PID: $HUSKY_PID"
 echo "Camera risk PID: $CAMERA_RISK_PID"
 echo "UI PID: $UI_PID"
 

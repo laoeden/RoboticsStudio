@@ -11,7 +11,7 @@ feedback directly, rather than the filtered `/parrot1/odom` estimate.
 Build the changed simulation package from the RoboticsStudio directory:
 
 ```bash
-cd /home/jaiden/git/RoboticsStudio
+cd /home/aphri/robotStudio/RoboticsStudio
 source /opt/ros/humble/setup.bash
 colcon build --symlink-install --packages-select 41068_ignition_bringup
 source install/setup.bash
@@ -21,20 +21,19 @@ ros2 launch 41068_ignition_bringup 41068_ignition_parrot.launch.py world:=simple
 Start a fresh simulation after rebuilding so it loads the 3D odometry change.
 Press Play if Gazebo is paused. In a second terminal:
 
-In a second terminal
 ```bash
 source /opt/ros/humble/setup.bash
-cd /home/jaiden/git/RoboticsStudio/DroneStuff
-python3 DroneMotion.py
+cd /home/aphri/robotStudio/RoboticsStudio
+python3 DroneStuff/DroneMotion.py
 ```
 
 In a third terminal, inspect the current position first:
 
 ```bash
 source /opt/ros/humble/setup.bash
-cd /home/jaiden/git/RoboticsStudio/DroneStuff
+cd /home/aphri/robotStudio/RoboticsStudio
 ros2 topic echo /parrot1/odometry --once
-python3 send_goal.py 0 0 3
+python3 DroneStuff/send_goal.py 0 0 3
 ```
 
 Coordinates are absolute metres in `parrot1_odom`, the simulator's world-fixed
@@ -42,14 +41,15 @@ odometry frame. They are not relative movement offsets or height above terrain.
 For a vertical climb, use the current odometry x and y and a higher z; `(0, 0, 3)`
 is only an example destination. Choose a point clear of the terrain.
 The controller reports acceptance and `Arrived` in its terminal. After arrival,
-send another coordinate, for example `python3 send_goal.py 5 2 3`.
+send another coordinate, for example
+`python3 DroneStuff/send_goal.py 5 2 3`.
 The sender reports delivery only, not acceptance or arrival.
 
 To run a named sequence, use `sequence_goals.py`. Waypoints are absolute
 positions and are sent in the order they appear:
 
 ```bash
-python3 sequence_goals.py \
+python3 DroneStuff/sequence_goals.py \
   --waypoint takeoff 2 0 2 \
   --waypoint travel 6 2 2 \
   --waypoint landing 6 2 0.8
@@ -58,6 +58,33 @@ python3 sequence_goals.py \
 The script waits for each waypoint to be reached before publishing the next
 one. Use `--tolerance` and `--timeout` to adjust arrival distance and the
 maximum time allowed for each movement.
+
+## Camera contour goals
+
+`camera_risk.py` can publish detected contour locations as Husky goals. It
+uses the Parrot camera/depth data to calculate a world position, then sends a
+`PointStamped` goal to `/husky1/goal` for `HuskyMotion.py`. Start the Husky
+controller when using this feature:
+
+```bash
+python3 HuskyScripts/HuskyMotion.py
+python3 DroneStuff/camera_risk.py
+```
+
+Each location is queued and published once per camera process. The next goal
+is not published until the Husky reaches the current goal within `0.2` metres,
+so detections do not overwrite one another. A later contour within `0.5`
+metres of a previously queued or published location is treated as the same
+location. This memory is in process only and resets when `camera_risk.py` is
+restarted. Adjust the duplicate radius with:
+
+```bash
+python3 DroneStuff/camera_risk.py \
+  --ros-args -p duplicate_radius:=1.0
+```
+
+The Husky arrival distance can be adjusted independently with
+`husky_goal_tolerance`.
 
 ## Behaviour and tuning
 
@@ -76,7 +103,7 @@ maximum time allowed for each movement.
 Example tuning:
 
 ```bash
-python3 DroneMotion.py --ros-args -p max_speed:=0.5 -p tolerance:=0.1 -p goal_timeout:=180.0
+python3 DroneStuff/DroneMotion.py --ros-args -p max_speed:=0.5 -p tolerance:=0.1 -p goal_timeout:=180.0
 ```
 
 Run the controller checks:

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Send a named sequence of absolute goals to DroneMotion.py."""
+"""Send a named sequence of absolute goals to a robot motion controller."""
 
 import argparse
 import math
@@ -22,8 +22,9 @@ class Waypoint:
 
 
 class GoalSequence(Node):
-    def __init__(self, namespace: str, frame: str) -> None:
+    def __init__(self, robot: str, namespace: str, frame: str) -> None:
         super().__init__('sequence_goals', namespace=namespace)
+        self.robot = robot
         self.frame = frame
         self.odometry: Odometry | None = None
         self.publisher = self.create_publisher(PointStamped, 'goal', 10)
@@ -42,13 +43,14 @@ class GoalSequence(Node):
         while self.publisher.get_subscription_count() == 0:
             if time.monotonic() >= deadline:
                 raise RuntimeError(
-                    'No goal subscriber found. Start DroneMotion.py first.'
+                    f'No goal subscriber found. Start the {self.robot} motion '
+                    'controller first.'
                 )
             rclpy.spin_once(self, timeout_sec=0.1)
 
         while self.odometry is None:
             if time.monotonic() >= deadline:
-                raise RuntimeError('No odometry received from the Parrot.')
+                raise RuntimeError(f'No odometry received from the {self.robot}.')
             rclpy.spin_once(self, timeout_sec=0.1)
 
     def send_waypoint(
@@ -64,10 +66,10 @@ class GoalSequence(Node):
         message.point.y = waypoint.y
         message.point.z = waypoint.z
 
-        self.get_logger().info(
-            f'Starting {waypoint.name}: '
-            f'({waypoint.x:.2f}, {waypoint.y:.2f}, {waypoint.z:.2f})'
-        )
+        target_text = f'({waypoint.x:.2f}, {waypoint.y:.2f}, {waypoint.z:.2f})'
+        if self.robot == 'husky':
+            target_text += ' [Z ignored]'
+        self.get_logger().info(f'Starting {waypoint.name}: {target_text}')
         deadline = time.monotonic() + timeout
         next_publish = 0.0
         while True:
@@ -85,11 +87,14 @@ class GoalSequence(Node):
                 continue
 
             position = odometry.pose.pose.position
-            distance = math.sqrt(
-                (position.x - waypoint.x) ** 2
-                + (position.y - waypoint.y) ** 2
-                + (position.z - waypoint.z) ** 2
+            distance = math.hypot(
+                position.x - waypoint.x,
+                position.y - waypoint.y,
             )
+            if self.robot == 'parrot':
+                distance = math.sqrt(
+                    distance ** 2 + (position.z - waypoint.z) ** 2
+                )
             if distance <= tolerance:
                 self.get_logger().info(
                     f"Completed {waypoint.name}: {distance:.3f} m from goal."
@@ -113,6 +118,12 @@ def parse_waypoint(values: list[str]) -> Waypoint:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
+        '--robot',
+        choices=('parrot', 'husky'),
+        default='parrot',
+        help='robot to control; Husky ignores waypoint Z (default: parrot)',
+    )
+    parser.add_argument(
         '--waypoint',
         action='append',
         nargs=4,
@@ -120,31 +131,41 @@ def main() -> None:
         required=True,
         help='named absolute goal; repeat for each movement in order',
     )
-    parser.add_argument('--namespace', default='parrot1')
-    parser.add_argument('--frame', default='parrot1_odom')
-    parser.add_argument('--tolerance', type=float, default=0.15)
+    parser.add_argument('--namespace')
+    parser.add_argument('--frame')
+    parser.add_argument(
+        '--tolerance',
+        type=float,
+        help='arrival distance in metres (default: 0.15 Parrot, 0.20 Husky)',
+    )
     parser.add_argument('--timeout', type=float, default=120.0)
     parser.add_argument('--connect-timeout', type=float, default=10.0)
     parser.add_argument('--publish-period', type=float, default=1.0)
     args = parser.parse_args()
 
     if any(value <= 0 for value in (
-        args.tolerance,
         args.timeout,
         args.connect_timeout,
         args.publish_period,
-    )):
+    )) or args.tolerance is not None and args.tolerance <= 0:
         parser.error('timeouts, tolerance, and publish period must be positive')
 
     waypoints = [parse_waypoint(values) for values in args.waypoint]
+    default_namespace = {'parrot': 'parrot1', 'husky': 'husky1'}[args.robot]
+    default_frame = {'parrot': 'parrot1_odom', 'husky': 'husky1_odom'}[args.robot]
+    tolerance = args.tolerance
+    if tolerance is None:
+        tolerance = {'parrot': 0.15, 'husky': 0.2}[args.robot]
+    namespace = args.namespace or default_namespace
+    frame = args.frame or default_frame
     rclpy.init(args=[])
-    node = GoalSequence(args.namespace, args.frame)
+    node = GoalSequence(args.robot, namespace, frame)
     try:
         node.wait_for_connections(args.connect_timeout)
         for waypoint in waypoints:
             node.send_waypoint(
                 waypoint,
-                args.tolerance,
+                tolerance,
                 args.timeout,
                 args.publish_period,
             )
