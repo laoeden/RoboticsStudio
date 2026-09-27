@@ -1,5 +1,6 @@
 import tkinter as tk
 from datetime import datetime
+import math
 import threading
 
 import rclpy
@@ -52,6 +53,12 @@ ugv_heading = None
 
 uav_x = None
 uav_y = None
+uav_z = None
+previous_uav_x = None
+previous_uav_y = None
+spiral_active = False
+spiral_targets = []
+spiral_index = 0
 
 def odometry_callback(msg):
     global ugv_x, ugv_y
@@ -67,10 +74,11 @@ odom_sub = ros_node.create_subscription(
 )
 
 def drone_odometry_callback(msg):
-    global uav_x, uav_y
+    global uav_x, uav_y, uav_z
 
     uav_x = msg.pose.pose.position.x
     uav_y = msg.pose.pose.position.y
+    uav_z = msg.pose.pose.position.z
 
 
 drone_odom_sub = ros_node.create_subscription(
@@ -97,9 +105,6 @@ rgb_sub = ros_node.create_subscription(
     rgb_callback,
     10
 )
-
-
-
 
 
 def ros_spin():
@@ -134,6 +139,16 @@ def publish_command(command):
 
     ros_node.get_logger().info(f"Published command: {command}")
 
+
+def publish_drone_goal(x, y, z):
+    msg = PointStamped()
+    msg.header.frame_id = "parrot1_odom"
+    msg.point.x = x
+    msg.point.y = y
+    msg.point.z = z
+    drone_goal_pub.publish(msg)
+    ros_node.get_logger().info(f"Sent drone goal: ({x}, {y}, {z})")
+
 def send_drone_goal():
     try:
         x = float(drone_x_entry.get())
@@ -143,17 +158,7 @@ def send_drone_goal():
         ros_node.get_logger().error("Drone coordinates must be numbers")
         return
 
-    msg = PointStamped()
-    msg.header.frame_id = "parrot1_odom"
-    msg.point.x = x
-    msg.point.y = y
-    msg.point.z = z
-
-    drone_goal_pub.publish(msg)
-
-    ros_node.get_logger().info(
-        f"Sent drone goal: ({x}, {y}, {z})"
-    )
+    publish_drone_goal(x, y, z)
 
 def timestamp():
     return datetime.now().strftime("%H:%M:%S")
@@ -166,7 +171,28 @@ def add_log(source, message):
     log.config(state="disabled")
 
 def start_mission():
+    global spiral_active, spiral_targets, spiral_index
+
     publish_command("START")
+
+    spiral_center_x = 0.0 # this can later be adjusted through the UI or mission parameters
+    spiral_center_y = 0.0
+
+    spiral_radius = 15
+    spiral_expainsion_rate = 0.7
+    spiral_steps = round(spiral_radius / spiral_expainsion_rate)
+
+    spiral_targets = [
+        (
+            spiral_center_x + 0.7 * step * math.cos(step * math.pi / 4),
+            spiral_center_y + 0.7 * step * math.sin(step * math.pi / 4),
+            10.0,
+        )
+        for step in range(spiral_steps)
+    ]
+    spiral_index = 0
+    spiral_active = True
+    publish_drone_goal(*spiral_targets[spiral_index])
 
     status_value.config(text="ACTIVE", fg=GREEN_BRIGHT)
     mission_value.config(text="EXECUTING")
@@ -174,7 +200,10 @@ def start_mission():
 
 
 def stop_mission():
+    global spiral_active
+
     publish_command("STOP")
+    spiral_active = False
 
     status_value.config(text="HALTED", fg=RED)
     mission_value.config(text="STOPPED")
@@ -182,7 +211,12 @@ def stop_mission():
 
 
 def return_to_base():
+    global spiral_active
+
     publish_command("RETURN_TO_BASE")
+    spiral_active = False
+
+    publish_drone_goal(0.0, 0.0, 10.0)
 
     status_value.config(text="RTB", fg=AMBER)
     mission_value.config(text="RETURN TO BASE")
@@ -339,6 +373,9 @@ info_row(left, "LINK", "GOOD")
 
 ugv_x_label = info_row(left, "UGV X", "-- m")
 ugv_y_label = info_row(left, "UGV Y", "-- m")
+uav_x_label = info_row(left, "UAV X", "-- m")
+uav_y_label = info_row(left, "UAV Y", "-- m")
+uav_z_label = info_row(left, "UAV Z", "-- m")
 
 
 tk.Frame(left, bg=BORDER, height=1).pack(
@@ -486,13 +523,15 @@ rgb_camera_label.pack(fill="both", expand=True, padx=8, pady=(0, 8))
 for x in range(0, 1000, 40):
     canvas.create_line(
         x, 0, x, 700,
-        fill="#1b241a"
+        fill="#1b241a",
+        tags="map_feature"
     )
 
 for y in range(0, 700, 40):
     canvas.create_line(
         0, y, 1000, y,
-        fill="#1b241a"
+        fill="#1b241a",
+        tags="map_feature"
     )
 
 
@@ -507,7 +546,8 @@ canvas.create_polygon(
     outline=GREEN,
     fill="",
     width=2,
-    dash=(8, 5)
+    dash=(8, 5),
+    tags="map_feature"
 )
 
 # UGV
@@ -548,9 +588,11 @@ MAP_ORIGIN_X = 405
 MAP_ORIGIN_Y = 315
 MAP_SCALE = 25
 
-def world_to_map(x, y):
-    map_x = MAP_ORIGIN_X + (x * MAP_SCALE)
-    map_y = MAP_ORIGIN_Y - (y * MAP_SCALE)
+def world_to_map(x, y, center_x=0.0, center_y=0.0):
+    map_center_x = canvas.winfo_width() / 2
+    map_center_y = canvas.winfo_height() / 2
+    map_x = map_center_x + ((x - center_x) * MAP_SCALE)
+    map_y = map_center_y - ((y - center_y) * MAP_SCALE)
 
     return map_x, map_y
 
@@ -567,7 +609,8 @@ for hx, hy in hazards:
         hx - 10, hy + 10,
         hx + 10, hy + 10,
         fill=RED,
-        outline=""
+        outline="",
+        tags="map_feature"
     )
 
     canvas.create_text(
@@ -575,7 +618,8 @@ for hx, hy in hazards:
         hy + 2,
         text="!",
         fill="white",
-        font=("DejaVu Sans Mono", 9, "bold")
+        font=("DejaVu Sans Mono", 9, "bold"),
+        tags="map_feature"
     )
 
 
@@ -585,7 +629,8 @@ canvas.create_text(
     text='GRID REF: FIELD_A1',
     anchor="nw",
     fill=TEXT_DIM,
-    font=("DejaVu Sans Mono", 8)
+    font=("DejaVu Sans Mono", 8),
+    tags="map_feature"
 )
 
 
@@ -782,16 +827,65 @@ def on_close():
 
 root.protocol("WM_DELETE_WINDOW", on_close)
 
+
+def advance_spiral():
+    global spiral_active, spiral_index
+
+    if not spiral_active or uav_x is None or uav_y is None or uav_z is None:
+        return
+
+    target_x, target_y, target_z = spiral_targets[spiral_index]
+    distance = math.sqrt(
+        (uav_x - target_x) ** 2
+        + (uav_y - target_y) ** 2
+        + (uav_z - target_z) ** 2
+    )
+    if distance > 0.2:
+        return
+
+    if spiral_index == len(spiral_targets) - 1:
+        spiral_active = False
+        add_log("UAV", "SPIRAL COMPLETE")
+        return
+
+    spiral_index += 1
+    publish_drone_goal(*spiral_targets[spiral_index])
+
+
 def update_telemetry_ui():
+    global previous_uav_x, previous_uav_y
+
+    advance_spiral()
+
+    if uav_x is not None and uav_y is not None:
+        if previous_uav_x is not None and previous_uav_y is not None:
+            # Move the map features in the opposite direction of the UAV's movement to keep the UAV centered
+            canvas.move(
+                "map_feature",
+                (previous_uav_x - uav_x) * MAP_SCALE,
+                (uav_y - previous_uav_y) * MAP_SCALE,
+            )
+        previous_uav_x = uav_x
+        previous_uav_y = uav_y
+
     if ugv_x is not None:
         ugv_x_label.config(text=f"{ugv_x:.2f} m")
 
     if ugv_y is not None:
         ugv_y_label.config(text=f"{ugv_y:.2f} m")
 
+    if uav_x is not None:
+        uav_x_label.config(text=f"{uav_x:.2f} m")
+
+    if uav_y is not None:
+        uav_y_label.config(text=f"{uav_y:.2f} m")
+
+    if uav_z is not None:
+        uav_z_label.config(text=f"{uav_z:.2f} m")
+
     # Move UGV marker
     if ugv_x is not None and ugv_y is not None:
-        map_x, map_y = world_to_map(ugv_x, ugv_y)
+        map_x, map_y = world_to_map(ugv_x, ugv_y, uav_x or 0.0, uav_y or 0.0)
 
         canvas.coords(
             ugv_marker,
@@ -806,7 +900,8 @@ def update_telemetry_ui():
 
     # Move UAV marker
     if uav_x is not None and uav_y is not None:
-        map_x, map_y = world_to_map(uav_x, uav_y)
+        # Use the UAV's current position as the center of the map
+        map_x, map_y = world_to_map(uav_x, uav_y, uav_x, uav_y)
 
         canvas.coords(
             uav_marker,

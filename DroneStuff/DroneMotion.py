@@ -35,7 +35,7 @@ def body_velocity(position, target, quaternion, gain, max_speed, tolerance):
 class DroneMotion(Node):
     def __init__(self):
         super().__init__('drone_motion', namespace='parrot1')
-        defaults = {'gain': 0.8, 'max_speed': 1.0, 'tolerance': 0.15,
+        defaults = {'gain': 0.8, 'max_speed': 3.0, 'tolerance': 0.15,
                     'odom_timeout': 5.0, 'goal_timeout': 120.0}
         for name, value in defaults.items():
             self.declare_parameter(name, value)
