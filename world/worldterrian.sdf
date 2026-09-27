@@ -40,12 +40,59 @@
       </link>
     </model>
 
+
+
+
+      <!-- Rocks -->
+    <include>
+      <uri>https://fuel.gazebosim.org/1.0/OpenRobotics/models/Falling%20Rock%201</uri>
+      <name>rocks1</name>
+      <pose>-3 2 2 0 0 0</pose>
+      <static>true</static>
+    </include>
+
+    <!-- Oak tree -->
+    <include>
+      <uri>
+        https://fuel.gazebosim.org/1.0/OpenRobotics/models/Oak%20tree
+      </uri>
+      <name>oak1</name>
+      <pose>0 3.0 2 0 0 0</pose>
+      <static>true</static>
+    </include>
+
+
+    <!-- Pine tree -->
+    <include>
+      <uri>
+        https://fuel.gazebosim.org/1.0/OpenRobotics/models/Pine%20tree
+      </uri>
+      <name>pine1</name>
+      <pose>5.0 0.0 2 0 0 0</pose>
+      <static>true</static>
+    </include>  
+
+    <!-- Kangaroo -->
+    <include>
+      <uri>model://SomeKangaroo</uri>
+      <name>kangaroo</name>
+      <pose>2 0 2 0 0 0</pose>
+      <static>true</static>
+    </include>
+
+    <!--dry grass-->
+    <include>
+       <uri>model://Dry_Grass</uri>
+       <name>dry_grass</name>
+       <pose>0 -2 1.5 0 0 0</pose>
+       <static>true</static>
+    </include>
   </world>
 </sdf>
 
 <!--cd ~/git/RoboticsStudio
+export IGN_GAZEBO_RESOURCE_PATH="$PWD/models${IGN_GAZEBO_RESOURCE_PATH:+:$IGN_GAZEBO_RESOURCE_PATH}"
 ign gazebo -v 4 world/worldterrian.sdf
-Ogre 2 is the default render engine.
 
 cd ~/git/RoboticsStudio
 source /opt/ros/humble/setup.bash
