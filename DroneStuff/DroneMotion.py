@@ -12,6 +12,7 @@ from rclpy.clock import Clock, ClockType
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
 from rclpy.signals import SignalHandlerOptions
+from sensor_msgs.msg import LaserScan
 
 
 def body_velocity(position, target, quaternion, gain, max_speed, tolerance):
@@ -32,11 +33,42 @@ def body_velocity(position, target, quaternion, gain, max_speed, tolerance):
     ), distance
 
 
+def avoidance_velocity(ranges, angle_min, angle_increment, safe_distance, gain):
+    """Return a body-frame (vx, vy) push-away vector from close LiDAR returns.
+
+    Each finite reading closer than `safe_distance` contributes a vector
+    pointing back along its bearing (angle_min + index * angle_increment,
+    measured the same way as the rest of the scan/Twist convention used
+    elsewhere in this project), scaled by how far inside `safe_distance`
+    it is. Readings that are non-finite, non-positive, or at/after
+    `safe_distance` are ignored, so a clear scan contributes nothing.
+    """
+    push_x = 0.0
+    push_y = 0.0
+    for index, distance in enumerate(ranges):
+        if not math.isfinite(distance) or distance <= 0.0 or distance >= safe_distance:
+            continue
+        angle = angle_min + index * angle_increment
+        closeness = (safe_distance - distance) / safe_distance
+        push_x -= math.cos(angle) * closeness
+        push_y -= math.sin(angle) * closeness
+    return push_x * gain, push_y * gain
+
+
+def horizontal_speed_limit(vx, vy, max_speed):
+    """Clamp the (vx, vy) magnitude to max_speed, preserving direction."""
+    speed = math.hypot(vx, vy)
+    if speed > max_speed and speed > 0.0:
+        scale = max_speed / speed
+        return vx * scale, vy * scale
+    return vx, vy
+
 class DroneMotion(Node):
     def __init__(self):
         super().__init__('drone_motion', namespace='parrot1')
         defaults = {'gain': 0.8, 'max_speed': 3.0, 'tolerance': 0.15,
-                    'odom_timeout': 5.0, 'goal_timeout': 120.0}
+                    'odom_timeout': 5.0, 'goal_timeout': 120.0,
+                    'safe_distance': 1.5, 'avoid_gain': 1.5, 'scan_timeout': 1.0}
         for name, value in defaults.items():
             self.declare_parameter(name, value)
             value = float(self.get_parameter(name).value)
@@ -47,10 +79,15 @@ class DroneMotion(Node):
         self.odom_received = 0.0
         self.goal = None
         self.goal_started = 0.0
+        self.scan = None
+        self.scan_received = 0.0
         self.publisher = self.create_publisher(Twist, 'cmd_vel', 10)
         self.create_subscription(Odometry, 'odometry', self.on_odom,
                                  qos_profile_sensor_data)
         self.create_subscription(PointStamped, 'goal', self.on_goal, 10)
+        self.create_subscription(LaserScan, 'scan', self.on_scan,
+                                 qos_profile_sensor_data)
+        
         # Wall-clock watchdog still stops commands when simulation time pauses.
         self.create_timer(0.05, self.tick,
                           clock=Clock(clock_type=ClockType.STEADY_TIME))
@@ -65,6 +102,10 @@ class DroneMotion(Node):
             return
         self.odom = msg
         self.odom_received = time.monotonic()
+
+    def on_scan(self, msg):
+        self.scan = msg
+        self.scan_received = time.monotonic()
 
     def on_goal(self, msg):
         if not all(math.isfinite(v) for v in (msg.point.x, msg.point.y, msg.point.z)):
@@ -99,8 +140,21 @@ class DroneMotion(Node):
         velocity, distance = body_velocity(
             (p.x, p.y, p.z), (t.x, t.y, t.z), (q.x, q.y, q.z, q.w),
             self.gain, self.max_speed, self.tolerance)
+        vx, vy, vz = velocity
+        # LiDAR-based reactive avoidance: nudge the horizontal command away
+        # from anything within safe_distance, then re-clamp to max_speed.
+        # The scan is in the body/base_scan frame already, same as vx/vy,
+        # so no odometry rotation is needed here.
+        if self.scan is not None and now - self.scan_received <= self.scan_timeout:
+            avoid_x, avoid_y = avoidance_velocity(
+                self.scan.ranges, self.scan.angle_min, self.scan.angle_increment,
+                self.safe_distance, self.avoid_gain)
+            if avoid_x != 0.0 or avoid_y != 0.0:
+                self.get_logger().warn(
+                    'Steering around a nearby obstacle.', throttle_duration_sec=1.0)
+            vx, vy = horizontal_speed_limit(vx + avoid_x, vy + avoid_y, self.max_speed)
         cmd = Twist()
-        cmd.linear.x, cmd.linear.y, cmd.linear.z = velocity
+        cmd.linear.x, cmd.linear.y, cmd.linear.z = vx, vy, vz
         self.publisher.publish(cmd)
         if distance <= self.tolerance:
             self.get_logger().info(f'Arrived: {distance:.3f} m from target.')
