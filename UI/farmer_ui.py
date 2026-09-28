@@ -59,6 +59,7 @@ previous_uav_y = None
 spiral_active = False
 spiral_targets = []
 spiral_index = 0
+estop_active = False
 
 def odometry_callback(msg):
     global ugv_x, ugv_y
@@ -131,6 +132,12 @@ drone_goal_pub = ros_node.create_publisher(
     10
 )
 
+husky_goal_pub = ros_node.create_publisher(
+    PointStamped,
+    "/husky1/goal",
+    10
+)
+
 
 def publish_command(command):
     msg = String()
@@ -159,6 +166,31 @@ def send_drone_goal():
         return
 
     publish_drone_goal(x, y, z)
+
+def publish_husky_goal(x, y):
+    msg = PointStamped()
+    msg.header.frame_id = "husky1_odom"
+    msg.point.x = x
+    msg.point.y = y
+    msg.point.z = 0.0
+
+    husky_goal_pub.publish(msg)
+
+    ros_node.get_logger().info(
+        f"Sent Husky goal: ({x}, {y})"
+    )
+
+
+def send_husky_goal():
+    try:
+        x = float(husky_x_entry.get())
+        y = float(husky_y_entry.get())
+    except ValueError:
+        ros_node.get_logger().error("Husky coordinates must be numbers")
+        return
+
+    publish_husky_goal(x, y)
+
 
 def timestamp():
     return datetime.now().strftime("%H:%M:%S")
@@ -224,11 +256,49 @@ def return_to_base():
 
 
 def emergency_stop():
-    publish_command("EMERGENCY_STOP")
+    global estop_active, spiral_active
 
-    status_value.config(text="E-STOP", fg=RED)
-    mission_value.config(text="EMERGENCY STOP")
-    add_log("SYSTEM", "EMERGENCY STOP ACTIVATED")
+    estop_active = not estop_active
+
+    controls = [
+        start_button,
+        stop_button,
+        rtb_button,
+        send_goal_button,
+        drone_x_entry,
+        drone_y_entry,
+        drone_z_entry,
+        send_husky_goal_button,
+        husky_x_entry,
+        husky_y_entry
+    ]
+
+    if estop_active:
+        publish_command("EMERGENCY_STOP")
+        spiral_active = False
+
+        for control in controls:
+            control.config(state="disabled")
+
+        status_value.config(text="E-STOP", fg=RED)
+        mission_value.config(text="EMERGENCY STOP")
+
+        estop_button.config(text="[ RESET E-STOP ]")
+
+        add_log("SYSTEM", "EMERGENCY STOP ACTIVATED")
+
+    else:
+        publish_command("EMERGENCY_STOP_RESET")
+
+        for control in controls:
+            control.config(state="normal")
+
+        status_value.config(text="READY", fg=GREEN_BRIGHT)
+        mission_value.config(text="STANDBY")
+
+        estop_button.config(text="[ EMERGENCY STOP ]")
+
+        add_log("SYSTEM", "EMERGENCY STOP RESET")
 
 # =========================================================
 # HEADER
@@ -418,12 +488,13 @@ def tactical_button(text, command, colour=TEXT):
         font=("DejaVu Sans Mono", 9, "bold")
     )
     button.pack(fill="x", padx=12, pady=5, ipady=8)
+    return button
 
 
-tactical_button("[ START MISSION ]", start_mission, GREEN_BRIGHT)
-tactical_button("[ STOP ]", stop_mission, AMBER)
-tactical_button("[ RETURN TO BASE ]", return_to_base)
-tactical_button("[ EMERGENCY STOP ]", emergency_stop, RED)
+start_button = tactical_button("[ START MISSION ]", start_mission, GREEN_BRIGHT)
+stop_button = tactical_button("[ STOP ]", stop_mission, AMBER)
+rtb_button = tactical_button("[ RETURN TO BASE ]", return_to_base)
+estop_button = tactical_button("[ EMERGENCY STOP ]", emergency_stop, RED)
 
 drone_target_frame = tk.Frame(left, bg=PANEL)
 drone_target_frame.pack(fill="x", padx=15, pady=10)
@@ -448,11 +519,39 @@ drone_z_entry = tk.Entry(drone_target_frame, width=7)
 drone_z_entry.pack(side="left", padx=2)
 drone_z_entry.insert(0, "2")
 
-tk.Button(
+send_goal_button = tk.Button(
     drone_target_frame,
     text="SEND GOAL",
     command=send_drone_goal
-).pack(side="left", padx=5)
+)
+send_goal_button.pack(side="left", padx=5)
+
+husky_target_frame = tk.Frame(left, bg=PANEL)
+husky_target_frame.pack(fill="x", padx=15, pady=10)
+
+tk.Label(
+    husky_target_frame,
+    text="GROUND ROBOT TARGET",
+    bg=PANEL,
+    fg=TEXT,
+    font=("DejaVu Sans Mono", 10, "bold")
+).pack(anchor="w", pady=(0, 5))
+
+husky_x_entry = tk.Entry(husky_target_frame, width=7)
+husky_x_entry.pack(side="left", padx=2)
+husky_x_entry.insert(0, "0")
+
+husky_y_entry = tk.Entry(husky_target_frame, width=7)
+husky_y_entry.pack(side="left", padx=2)
+husky_y_entry.insert(0, "0")
+
+send_husky_goal_button = tk.Button(
+    husky_target_frame,
+    text="SEND GOAL",
+    command=send_husky_goal
+)
+
+send_husky_goal_button.pack(side="left", padx=5)
 
 # =========================================================
 # CENTER PANEL

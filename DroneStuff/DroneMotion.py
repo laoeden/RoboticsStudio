@@ -13,6 +13,7 @@ from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
 from rclpy.signals import SignalHandlerOptions
 from sensor_msgs.msg import LaserScan
+from std_msgs.msg import String
 
 
 def body_velocity(position, target, quaternion, gain, max_speed, tolerance):
@@ -81,12 +82,19 @@ class DroneMotion(Node):
         self.goal_started = 0.0
         self.scan = None
         self.scan_received = 0.0
+        self.estop_active = False
         self.publisher = self.create_publisher(Twist, 'cmd_vel', 10)
         self.create_subscription(Odometry, 'odometry', self.on_odom,
                                  qos_profile_sensor_data)
         self.create_subscription(PointStamped, 'goal', self.on_goal, 10)
         self.create_subscription(LaserScan, 'scan', self.on_scan,
                                  qos_profile_sensor_data)
+        self.create_subscription(
+        String,
+        '/mission_command',
+        self.on_mission_command,
+        10
+        )
         
         # Wall-clock watchdog still stops commands when simulation time pauses.
         self.create_timer(0.05, self.tick,
@@ -107,7 +115,22 @@ class DroneMotion(Node):
         self.scan = msg
         self.scan_received = time.monotonic()
 
+    def on_mission_command(self, msg):
+        if msg.data == 'EMERGENCY_STOP':
+            self.estop_active = True
+            self.goal = None
+            self.stop()
+            self.get_logger().warn('EMERGENCY STOP ACTIVE')
+
+        elif msg.data == 'EMERGENCY_STOP_RESET':
+            self.estop_active = False
+            self.get_logger().info('Emergency stop reset.')
+
     def on_goal(self, msg):
+        if self.estop_active:
+            self.get_logger().warn('Rejected goal: emergency stop is active.')
+            return
+
         if not all(math.isfinite(v) for v in (msg.point.x, msg.point.y, msg.point.z)):
             self.get_logger().error('Rejected goal: coordinates must be finite.')
             return
@@ -125,10 +148,16 @@ class DroneMotion(Node):
         self.publisher.publish(Twist())
 
     def tick(self):
+        if self.estop_active:
+            self.stop()
+            return
+        
         if self.goal is None:
             self.stop()
             return
+        
         now = time.monotonic()
+
         if (self.odom is None or now - self.odom_received > self.odom_timeout
                 or now - self.goal_started > self.goal_timeout
                 or self.odom.header.frame_id != self.goal.header.frame_id):

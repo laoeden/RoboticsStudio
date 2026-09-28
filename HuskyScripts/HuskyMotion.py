@@ -11,7 +11,7 @@ from rclpy.clock import Clock, ClockType
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
 from rclpy.signals import SignalHandlerOptions
-
+from std_msgs.msg import String
 
 def quaternion_yaw(quaternion) -> float:
     x, y, z, w = quaternion
@@ -49,6 +49,7 @@ class HuskyMotion(Node):
         self.odom_received = 0.0
         self.goal = None
         self.goal_started = 0.0
+        self.estop_active = False
         self.publisher = self.create_publisher(Twist, 'cmd_vel', 10)
         self.create_subscription(
             Odometry,
@@ -57,6 +58,14 @@ class HuskyMotion(Node):
             qos_profile_sensor_data,
         )
         self.create_subscription(PointStamped, 'goal', self.on_goal, 10)
+
+        self.create_subscription(
+            String,
+            '/mission_command',
+            self.on_mission_command,
+            10,
+        )
+
         self.create_timer(
             0.05,
             self.tick,
@@ -84,7 +93,23 @@ class HuskyMotion(Node):
         self.odom = message
         self.odom_received = time.monotonic()
 
+    def on_mission_command(self, message: String) -> None:
+        if message.data == 'EMERGENCY_STOP':
+            self.estop_active = True
+            self.goal = None
+            self.stop()
+            self.get_logger().warn('EMERGENCY STOP ACTIVE')
+
+        elif message.data == 'EMERGENCY_STOP_RESET':
+            self.estop_active = False
+            self.get_logger().info('Emergency stop reset.')
+
+
     def on_goal(self, message: PointStamped) -> None:
+        if self.estop_active:
+            self.get_logger().warn('Rejected goal: emergency stop is active.')
+            return
+
         if not all(math.isfinite(value) for value in (message.point.x, message.point.y)):
             self.get_logger().error('Rejected goal: X and Y must be finite.')
             return
@@ -110,11 +135,16 @@ class HuskyMotion(Node):
         self.publisher.publish(Twist())
 
     def tick(self) -> None:
+        if self.estop_active:
+            self.stop()
+            return
+
         if self.goal is None:
             self.stop()
             return
 
         now = time.monotonic()
+
         if (
             self.odom is None
             or now - self.odom_received > self.odom_timeout
