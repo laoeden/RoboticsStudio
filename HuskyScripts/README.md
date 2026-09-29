@@ -8,6 +8,11 @@ The Husky is a ground vehicle: the goal's `z` value is ignored. The controller
 turns toward each goal and then drives forward; it does not perform obstacle
 avoidance.
 
+While moving, it monitors `/husky1/scan`. Any valid lidar return within 45
+degrees of the front and within 1 metre cancels the active goal and publishes
+an obstacle-stop event. A Husky sequence receives that event and cancels all
+remaining waypoints.
+
 ## Run
 
 From the RoboticsStudio directory, start the simulation and then run:
@@ -49,6 +54,13 @@ Controller parameters can be overridden with ROS arguments, for example:
 ```bash
 python3 HuskyScripts/HuskyMotion.py \
   --ros-args -p max_speed:=0.5 -p position_tolerance:=0.1
+```
+
+The obstacle settings can also be changed:
+
+```bash
+python3 HuskyScripts/HuskyMotion.py \
+  --ros-args -p obstacle_distance:=1.5 -p front_angle:=0.785398
 ```
 
 Stop the controller with Ctrl+C so it publishes a final zero velocity.

@@ -7,6 +7,8 @@ import time
 import rclpy
 from geometry_msgs.msg import PointStamped, Twist
 from nav_msgs.msg import Odometry
+from sensor_msgs.msg import LaserScan
+from std_msgs.msg import Bool
 from rclpy.clock import Clock, ClockType
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
@@ -37,6 +39,8 @@ class HuskyMotion(Node):
             'position_tolerance': 0.2,
             'odom_timeout': 5.0,
             'goal_timeout': 120.0,
+            'obstacle_distance': 1.0,
+            'front_angle': math.pi / 4.0,
         }
         for name, value in defaults.items():
             self.declare_parameter(name, value)
@@ -49,8 +53,13 @@ class HuskyMotion(Node):
         self.odom_received = 0.0
         self.goal = None
         self.goal_started = 0.0
-        self.estop_active = False
+        self.obstacle_detected = False
         self.publisher = self.create_publisher(Twist, 'cmd_vel', 10)
+        self.obstacle_stop_publisher = self.create_publisher(
+            Bool,
+            'obstacle_stop',
+            10,
+        )
         self.create_subscription(
             Odometry,
             'odometry',
@@ -58,20 +67,48 @@ class HuskyMotion(Node):
             qos_profile_sensor_data,
         )
         self.create_subscription(PointStamped, 'goal', self.on_goal, 10)
-
         self.create_subscription(
-            String,
-            '/mission_command',
-            self.on_mission_command,
-            10,
+            LaserScan,
+            'scan',
+            self.on_scan,
+            qos_profile_sensor_data,
         )
-
         self.create_timer(
             0.05,
             self.tick,
             clock=Clock(clock_type=ClockType.STEADY_TIME),
         )
         self.get_logger().info('Ready: waiting for XY odometry and a goal.')
+
+    def on_scan(self, message: LaserScan) -> None:
+        if self.goal is None:
+            return
+        front_ranges = []
+        for index, distance in enumerate(message.ranges):
+            angle = (
+                message.angle_min + index * message.angle_increment + math.pi
+            ) % (2.0 * math.pi) - math.pi
+            if (
+                abs(angle) <= self.front_angle
+                and math.isfinite(distance)
+                and message.range_min <= distance <= message.range_max
+            ):
+                front_ranges.append(distance)
+
+        nearest_front_range = min(front_ranges, default=math.inf)
+        if nearest_front_range > self.obstacle_distance or self.obstacle_detected:
+            return
+        self.obstacle_detected = True
+        self.goal = None
+        self.stop()
+        event = Bool()
+        event.data = True
+        self.obstacle_stop_publisher.publish(event)
+        self.get_logger().error(
+            f'Collision point reached: nearest front lidar return is '
+            f'{nearest_front_range:.2f} m (limit {self.obstacle_distance:.2f} m); '
+            'movement cancelled.'
+        )
 
     def on_odom(self, message: Odometry) -> None:
         position = message.pose.pose.position
@@ -127,6 +164,10 @@ class HuskyMotion(Node):
             return
         self.goal = message
         self.goal_started = time.monotonic()
+        self.obstacle_detected = False
+        clear_event = Bool()
+        clear_event.data = False
+        self.obstacle_stop_publisher.publish(clear_event)
         self.get_logger().info(
             f'Moving to XY ({message.point.x}, {message.point.y}); Z ignored.'
         )
