@@ -47,8 +47,8 @@
     <include>
       <uri>https://fuel.gazebosim.org/1.0/OpenRobotics/models/Falling%20Rock%201</uri>
       <name>rocks1</name>
-      <pose>-3 2 2 0 0 0</pose>
-      <static>true</static>
+      <pose>-3 -2 5 0 0 0</pose>
+      <static>false</static>
     </include>
 
     <!-- Oak tree -->
@@ -57,10 +57,63 @@
         https://fuel.gazebosim.org/1.0/OpenRobotics/models/Oak%20tree
       </uri>
       <name>oak1</name>
-      <pose>0 3.0 2 0 0 0</pose>
+      <pose>-16 -14 1.999 0 0 0</pose>
       <static>true</static>
     </include>
 
+    <include>
+      <uri>
+        https://fuel.gazebosim.org/1.0/OpenRobotics/models/Oak%20tree
+      </uri>
+      <name>oak2</name>
+      <pose>0 -14 2.617 0 0 0</pose>
+      <static>true</static>
+    </include>
+
+        <include>
+      <uri>
+        https://fuel.gazebosim.org/1.0/OpenRobotics/models/Oak%20tree
+      </uri>
+      <name>oak3</name>
+      <pose>16 -14 3.432 0 0 0</pose>
+      <static>true</static>
+    </include>
+
+    <include>
+      <uri>
+        https://fuel.gazebosim.org/1.0/OpenRobotics/models/Oak%20tree
+      </uri>
+      <name>oak4</name>
+      <pose>-16 14 2.000 0 0 0</pose>
+      <static>true</static>
+    </include>
+
+    <include>
+      <uri>
+        https://fuel.gazebosim.org/1.0/OpenRobotics/models/Oak%20tree
+      </uri>
+      <name>oak5</name>
+      <pose>0 14 1.824 0 0 0</pose>
+      <static>true</static>
+    </include>
+
+    <include>
+      <uri>
+        https://fuel.gazebosim.org/1.0/OpenRobotics/models/Oak%20tree
+      </uri>
+      <name>oak6</name>
+      <pose>16 14 0.531 0 0 0</pose>
+      <static>true</static>
+    </include>
+
+    <include>
+      <uri>
+        https://fuel.gazebosim.org/1.0/OpenRobotics/models/Oak%20tree
+      </uri>
+      <name>oak7</name>
+      <pose>2 3 2 0 0 0</pose>
+      <static>true</static>
+    </include>
 
     <!-- Pine tree -->
     <include>
@@ -85,6 +138,34 @@
        <uri>model://Dry_Grass</uri>
        <name>dry_grass</name>
        <pose>0 -2 1.5 0 0 0</pose>
+       <static>true</static>
+    </include>
+
+    <include>
+       <uri>model://Dry_Grass</uri>
+       <name>dry_grass_2</name>
+       <pose>-12 -12 1.549 0 0 0</pose>
+       <static>true</static>
+    </include>
+
+    <include>
+       <uri>model://Dry_Grass</uri>
+       <name>dry_grass_3</name>
+       <pose>12 -12 2.216 0 0 0</pose>
+       <static>true</static>
+    </include>
+
+    <include>
+       <uri>model://Dry_Grass</uri>
+       <name>dry_grass_4</name>
+       <pose>-12 12 1.353 0 0 0</pose>
+       <static>true</static>
+    </include>
+
+    <include>
+       <uri>model://Dry_Grass</uri>
+       <name>dry_grass_5</name>
+       <pose>12 12 1.138 0 0 0</pose>
        <static>true</static>
     </include>
   </world>

@@ -71,8 +71,8 @@
     <include>
       <uri>https://fuel.gazebosim.org/1.0/OpenRobotics/models/Falling%20Rock%201</uri>
       <name>rocks1</name>
-      <pose>-3 2 1 0 0 0</pose>
-      <static>true</static>
+      <pose>-5 2 5 0 0 0</pose>
+      <static>false</static>
     </include>
 
     <!-- Kangaroo -->
