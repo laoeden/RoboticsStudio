@@ -1,3 +1,12 @@
+import sys
+from pathlib import Path
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(REPO_ROOT) not in sys.path:
+    sys.path.append(str(REPO_ROOT))
+
+from DroneStuff.camera_risk import process_frame
+
 import tkinter as tk
 from tkinter import ttk
 from datetime import datetime
@@ -1321,280 +1330,25 @@ def update_lidar_ui():
 def update_camera_risk_ui():
     if latest_rgb is not None:
         try:
-            image = latest_rgb.copy()
-
-            hsv_image = cv2.cvtColor(
-                image,
-                cv2.COLOR_BGR2HSV
+            processed = process_frame(
+                latest_rgb,
+                latest_depth,
+                risk_hue.get(),
+                risk_saturation.get(),
+                risk_value.get(),
+                risk_hue_tolerance.get(),
+                risk_saturation_tolerance.get(),
+                risk_value_tolerance.get(),
+                risk_texture_variance.get(),
+                risk_texture_fraction.get(),
             )
-
-            hue = risk_hue.get()
-            saturation = risk_saturation.get()
-            value = risk_value.get()
-
-            hue_tolerance = risk_hue_tolerance.get()
-            saturation_tolerance = risk_saturation_tolerance.get()
-            value_tolerance = risk_value_tolerance.get()
-
-            hue_delta = int(
-                round(179 * hue_tolerance / 100)
-            )
-
-            low_hue = hue - hue_delta
-            high_hue = hue + hue_delta
-
-            low_saturation = max(
-                0,
-                saturation - round(
-                    255 * saturation_tolerance / 100
-                )
-            )
-
-            high_saturation = min(
-                255,
-                saturation + round(
-                    255 * saturation_tolerance / 100
-                )
-            )
-
-            low_value = max(
-                0,
-                value - round(
-                    255 * value_tolerance / 100
-                )
-            )
-
-            high_value = min(
-                255,
-                value + round(
-                    255 * value_tolerance / 100
-                )
-            )
-
-            if low_hue < 0:
-                mask = cv2.inRange(
-                    hsv_image,
-                    np.array([
-                        0,
-                        low_saturation,
-                        low_value
-                    ]),
-                    np.array([
-                        high_hue,
-                        high_saturation,
-                        high_value
-                    ])
-                )
-
-                mask |= cv2.inRange(
-                    hsv_image,
-                    np.array([
-                        180 + low_hue,
-                        low_saturation,
-                        low_value
-                    ]),
-                    np.array([
-                        179,
-                        high_saturation,
-                        high_value
-                    ])
-                )
-
-            elif high_hue > 179:
-                mask = cv2.inRange(
-                    hsv_image,
-                    np.array([
-                        low_hue,
-                        low_saturation,
-                        low_value
-                    ]),
-                    np.array([
-                        179,
-                        high_saturation,
-                        high_value
-                    ])
-                )
-
-                mask |= cv2.inRange(
-                    hsv_image,
-                    np.array([
-                        0,
-                        low_saturation,
-                        low_value
-                    ]),
-                    np.array([
-                        high_hue - 180,
-                        high_saturation,
-                        high_value
-                    ])
-                )
-
-            else:
-                mask = cv2.inRange(
-                    hsv_image,
-                    np.array([
-                        low_hue,
-                        low_saturation,
-                        low_value
-                    ]),
-                    np.array([
-                        high_hue,
-                        high_saturation,
-                        high_value
-                    ])
-                )
-
-            # Texture filtering
-            gray = cv2.cvtColor(
-                image,
-                cv2.COLOR_BGR2GRAY
-            ).astype(np.float32)
-
-            mean = cv2.GaussianBlur(
-                gray,
-                (7, 7),
-                0
-            )
-
-            mean_squared = cv2.GaussianBlur(
-                gray * gray,
-                (7, 7),
-                0
-            )
-
-            variance = np.maximum(
-                mean_squared - mean * mean,
-                0.0
-            )
-
-            texture_mask = np.where(
-                variance >= risk_texture_variance.get(),
-                255,
-                0
-            ).astype(np.uint8)
-
-            filtered_mask = cv2.bitwise_and(
-                mask,
-                texture_mask
-            )
-
-            processed = cv2.bitwise_and(
-                image,
-                image,
-                mask=filtered_mask
-            )
-
-            # Find candidate risk regions
-            contours, _ = cv2.findContours(
-                mask,
-                cv2.RETR_EXTERNAL,
-                cv2.CHAIN_APPROX_SIMPLE
-            )
-
-            minimum_texture_fraction = (
-                risk_texture_fraction.get() / 100.0
-            )
-
-            for contour in contours:
-
-                if cv2.contourArea(contour) < 100.0:
-                    continue
-
-                x, y, width, height = cv2.boundingRect(contour)
-
-                contour_mask = np.zeros(
-                    mask.shape,
-                    dtype=np.uint8
-                )
-
-                cv2.drawContours(
-                    contour_mask,
-                    [contour],
-                    -1,
-                    255,
-                    thickness=-1
-                )
-
-                contour_pixels = contour_mask > 0
-
-                pixel_count = np.count_nonzero(
-                    contour_pixels
-                )
-
-                if pixel_count == 0:
-                    continue
-
-                textured_fraction = (
-                    np.count_nonzero(
-                        texture_mask[contour_pixels]
-                    )
-                    / pixel_count
-                )
-
-                if textured_fraction < minimum_texture_fraction:
-                    continue
-
-                if (
-                    latest_depth is not None
-                    and latest_depth.shape[:2] == mask.shape[:2]
-                ):
-                    valid_depth = latest_depth[
-                        contour_pixels
-                        & np.isfinite(latest_depth)
-                    ]
-
-                    valid_depth = valid_depth[
-                        (valid_depth >= 0.4)
-                        & (valid_depth <= 10.0)
-                    ]
-
-                    if valid_depth.size == 0:
-                        continue
-
-                    depth_m = float(
-                        np.median(valid_depth)
-                    )
-
-                    projected_area_m2 = (
-                        cv2.contourArea(contour)
-                        * depth_m ** 2
-                        / (207.85 * 207.85)
-                    )
-
-                    if projected_area_m2 < 0.05:
-                        continue
-
-                    label = f"{depth_m:.2f} m"
-
-                else:
-                    label = "depth unavailable"
-
-                cv2.rectangle(
-                    processed,
-                    (x, y),
-                    (x + width, y + height),
-                    (0, 255, 0),
-                    2
-                )
-
-                cv2.putText(
-                    processed,
-                    label,
-                    (x, max(20, y - 5)),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.5,
-                    (0, 255, 0),
-                    2
-                )
 
             processed = cv2.cvtColor(
                 processed,
                 cv2.COLOR_BGR2RGB
             )
 
-            risk_image = PILImage.fromarray(
-                processed
-            )
+            risk_image = PILImage.fromarray(processed)
 
             risk_image.thumbnail(
                 (1100, 650),

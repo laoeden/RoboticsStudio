@@ -56,81 +56,137 @@ def create_trackbars(window_name: str) -> None:
 	)
 
 
+def build_mask_from_values(
+    image: np.ndarray,
+    hue: int,
+    saturation: int,
+    value: int,
+    hue_tolerance: int,
+    saturation_tolerance: int,
+    value_tolerance: int,
+) -> np.ndarray:
+    if image.ndim == 2:
+        image = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
+
+    hsv_image = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
+
+    hue_delta = int(round(179 * hue_tolerance / 100))
+    low_hue = hue - hue_delta
+    high_hue = hue + hue_delta
+
+    low_saturation = max(
+        0,
+        saturation - round(255 * saturation_tolerance / 100)
+    )
+    high_saturation = min(
+        255,
+        saturation + round(255 * saturation_tolerance / 100)
+    )
+
+    low_value = max(
+        0,
+        value - round(255 * value_tolerance / 100)
+    )
+    high_value = min(
+        255,
+        value + round(255 * value_tolerance / 100)
+    )
+
+    if low_hue < 0:
+        mask = cv2.inRange(
+            hsv_image,
+            np.array([0, low_saturation, low_value]),
+            np.array([high_hue, high_saturation, high_value]),
+        )
+
+        mask |= cv2.inRange(
+            hsv_image,
+            np.array([180 + low_hue, low_saturation, low_value]),
+            np.array([179, high_saturation, high_value]),
+        )
+
+    elif high_hue > 179:
+        mask = cv2.inRange(
+            hsv_image,
+            np.array([low_hue, low_saturation, low_value]),
+            np.array([179, high_saturation, high_value]),
+        )
+
+        mask |= cv2.inRange(
+            hsv_image,
+            np.array([0, low_saturation, low_value]),
+            np.array([high_hue - 180, high_saturation, high_value]),
+        )
+
+    else:
+        mask = cv2.inRange(
+            hsv_image,
+            np.array([low_hue, low_saturation, low_value]),
+            np.array([high_hue, high_saturation, high_value]),
+        )
+
+    return mask
+
+
 def build_mask(image: np.ndarray, window_name: str) -> np.ndarray:
-	if image.ndim == 2:
-		image = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
-	hsv_image = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
-	hue = cv2.getTrackbarPos('Hue', window_name)
-	saturation = cv2.getTrackbarPos('Saturation', window_name)
-	value = cv2.getTrackbarPos('Value', window_name)
-	hue_tolerance = cv2.getTrackbarPos('Hue tolerance %', window_name)
-	saturation_tolerance = cv2.getTrackbarPos(
-		'Saturation tolerance %', window_name
-	)
-	value_tolerance = cv2.getTrackbarPos('Value tolerance %', window_name)
+    return build_mask_from_values(
+        image,
+        cv2.getTrackbarPos('Hue', window_name),
+        cv2.getTrackbarPos('Saturation', window_name),
+        cv2.getTrackbarPos('Value', window_name),
+        cv2.getTrackbarPos('Hue tolerance %', window_name),
+        cv2.getTrackbarPos('Saturation tolerance %', window_name),
+        cv2.getTrackbarPos('Value tolerance %', window_name),
+    )
 
-	hue_delta = int(round(179 * hue_tolerance / 100))
-	low_hue = hue - hue_delta
-	high_hue = hue + hue_delta
-	low_saturation = max(0, saturation - round(255 * saturation_tolerance / 100))
-	high_saturation = min(255, saturation + round(255 * saturation_tolerance / 100))
-	low_value = max(0, value - round(255 * value_tolerance / 100))
-	high_value = min(255, value + round(255 * value_tolerance / 100))
 
-	if low_hue < 0:
-		mask = cv2.inRange(
-			hsv_image,
-			np.array([0, low_saturation, low_value]),
-			np.array([high_hue, high_saturation, high_value]),
-		)
-		mask |= cv2.inRange(
-			hsv_image,
-			np.array([180 + low_hue, low_saturation, low_value]),
-			np.array([179, high_saturation, high_value]),
-		)
-	elif high_hue > 179:
-		mask = cv2.inRange(
-			hsv_image,
-			np.array([low_hue, low_saturation, low_value]),
-			np.array([179, high_saturation, high_value]),
-		)
-		mask |= cv2.inRange(
-			hsv_image,
-			np.array([0, low_saturation, low_value]),
-			np.array([high_hue - 180, high_saturation, high_value]),
-		)
-	else:
-		mask = cv2.inRange(
-			hsv_image,
-			np.array([low_hue, low_saturation, low_value]),
-			np.array([high_hue, high_saturation, high_value]),
-		)
+def build_texture_mask_from_value(
+    image: np.ndarray,
+    minimum_variance: int,
+) -> np.ndarray:
+    if image.ndim == 2:
+        gray_image = image.astype(np.float32)
+    else:
+        gray_image = cv2.cvtColor(
+            image,
+            cv2.COLOR_BGR2GRAY
+        ).astype(np.float32)
 
-	return mask
+    mean = cv2.GaussianBlur(
+        gray_image,
+        (TEXTURE_KERNEL_SIZE, TEXTURE_KERNEL_SIZE),
+        0,
+    )
+
+    mean_squared = cv2.GaussianBlur(
+        gray_image * gray_image,
+        (TEXTURE_KERNEL_SIZE, TEXTURE_KERNEL_SIZE),
+        0,
+    )
+
+    variance = np.maximum(
+        mean_squared - mean * mean,
+        0.0
+    )
+
+    return np.where(
+        variance >= minimum_variance,
+        255,
+        0
+    ).astype(np.uint8)
 
 
 def build_texture_mask(
-	image: np.ndarray,
-	window_name: str,
+    image: np.ndarray,
+    window_name: str,
 ) -> np.ndarray:
-	if image.ndim == 2:
-		gray_image = image.astype(np.float32)
-	else:
-		gray_image = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY).astype(np.float32)
-	mean = cv2.GaussianBlur(
-		gray_image,
-		(TEXTURE_KERNEL_SIZE, TEXTURE_KERNEL_SIZE),
-		0,
-	)
-	mean_squared = cv2.GaussianBlur(
-		gray_image * gray_image,
-		(TEXTURE_KERNEL_SIZE, TEXTURE_KERNEL_SIZE),
-		0,
-	)
-	variance = np.maximum(mean_squared - mean * mean, 0.0)
-	minimum_variance = cv2.getTrackbarPos('Texture variance', window_name)
-	return np.where(variance >= minimum_variance, 255, 0).astype(np.uint8)
-
+    return build_texture_mask_from_value(
+        image,
+        cv2.getTrackbarPos(
+            'Texture variance',
+            window_name
+        ),
+    )
 
 def camera_to_base(point: np.ndarray) -> np.ndarray:
 	"""Transform a point from the depth optical frame into parrot base frame."""
@@ -280,6 +336,84 @@ def find_world_points(
 		)
 	return world_points
 
+def process_frame(
+    image: np.ndarray,
+    depth: np.ndarray | None,
+    hue: int,
+    saturation: int,
+    value: int,
+    hue_tolerance: int,
+    saturation_tolerance: int,
+    value_tolerance: int,
+    texture_variance: int,
+    texture_fraction: int,
+) -> np.ndarray:
+
+    if image.ndim == 2:
+        image = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
+
+    mask = build_mask_from_values(
+        image,
+        hue,
+        saturation,
+        value,
+        hue_tolerance,
+        saturation_tolerance,
+        value_tolerance,
+    )
+
+    texture_mask = build_texture_mask_from_value(
+        image,
+        texture_variance,
+    )
+
+    filtered_mask = cv2.bitwise_and(
+        mask,
+        texture_mask
+    )
+
+    display = cv2.bitwise_and(
+        image,
+        image,
+        mask=filtered_mask
+    )
+
+    if depth is not None:
+        objects = find_objects(
+            mask,
+            depth,
+            texture_mask,
+            texture_fraction / 100.0,
+        )
+
+        for index, (_, (x, y, width, height), _, camera_point) in enumerate(
+            objects,
+            start=1,
+        ):
+            cv2.rectangle(
+                display,
+                (x, y),
+                (x + width, y + height),
+                (0, 255, 0),
+                2,
+            )
+
+            label = f"#{index}: depth unavailable"
+
+            if camera_point is not None:
+                label = f"#{index}: {camera_point[2]:.2f} m"
+
+            cv2.putText(
+                display,
+                label,
+                (x, max(20, y - 5)),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.5,
+                (0, 255, 0),
+                2,
+            )
+
+    return display
 
 def build_display(
 	image: np.ndarray,
