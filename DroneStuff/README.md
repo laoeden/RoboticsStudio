@@ -73,7 +73,7 @@ python3 DroneStuff/camera_risk.py
 
 Each location is queued and published once per camera process. The next goal
 is not published until the Husky reaches the current goal within `0.2` metres,
-so detections do not overwrite one another. A later contour within `0.5`
+so detections do not overwrite one another. A later contour within `1.0`
 metres of a previously queued or published location is treated as the same
 location. This memory is in process only and resets when `camera_risk.py` is
 restarted. Adjust the duplicate radius with:
@@ -85,6 +85,12 @@ python3 DroneStuff/camera_risk.py \
 
 The Husky arrival distance can be adjusted independently with
 `husky_goal_tolerance`.
+
+Contour detection also requires local image texture, not just a matching
+color. A 7x7 grayscale variance window is used; by default at least 35% of a
+contour must exceed variance `180` before it can become a goal. This suppresses
+smooth paths while retaining branch and leaf texture. The camera window now
+has live `Texture variance` and `Texture fraction %` controls for tuning.
 
 ## Behaviour and tuning
 

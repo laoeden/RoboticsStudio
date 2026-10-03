@@ -4,6 +4,7 @@
 import math
 import time
 
+import numpy as np
 import rclpy
 from geometry_msgs.msg import PointStamped, Twist
 from nav_msgs.msg import Odometry
@@ -14,6 +15,11 @@ from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
 from rclpy.signals import SignalHandlerOptions
 from std_msgs.msg import String
+
+try:
+    from grid_path_planner import plan_path
+except ImportError:
+    from HuskyScripts.grid_path_planner import plan_path
 
 def quaternion_yaw(quaternion) -> float:
     x, y, z, w = quaternion
@@ -41,6 +47,9 @@ class HuskyMotion(Node):
             'goal_timeout': 120.0,
             'obstacle_distance': 1.0,
             'front_angle': math.pi / 4.0,
+            'planning_range': 5.0,
+            'path_resolution': 0.2,
+            'robot_clearance': 0.45,
         }
         for name, value in defaults.items():
             self.declare_parameter(name, value)
@@ -54,6 +63,12 @@ class HuskyMotion(Node):
         self.goal = None
         self.goal_started = 0.0
         self.obstacle_detected = False
+        self.estop_active = False
+        self.scan_obstacle_points = np.empty((0, 2), dtype=np.float32)
+        self.scan_received = False
+        self.path = np.empty((0, 2), dtype=np.float32)
+        self.path_index = 0
+        self.path_replan_requested = False
         self.publisher = self.create_publisher(Twist, 'cmd_vel', 10)
         self.obstacle_stop_publisher = self.create_publisher(
             Bool,
@@ -81,6 +96,32 @@ class HuskyMotion(Node):
         self.get_logger().info('Ready: waiting for XY odometry and a goal.')
 
     def on_scan(self, message: LaserScan) -> None:
+        ranges = np.asarray(message.ranges, dtype=np.float32)
+        angles = message.angle_min + np.arange(
+            len(message.ranges), dtype=np.float32
+        ) * message.angle_increment
+        valid = np.isfinite(ranges)
+        valid &= ranges >= message.range_min
+        valid &= ranges <= min(message.range_max, self.planning_range)
+        if self.odom is not None and np.any(valid):
+            pose = self.odom.pose.pose
+            yaw = quaternion_yaw((
+                pose.orientation.x,
+                pose.orientation.y,
+                pose.orientation.z,
+                pose.orientation.w,
+            ))
+            local_x = ranges[valid] * np.cos(angles[valid])
+            local_y = ranges[valid] * np.sin(angles[valid])
+            cos_yaw = math.cos(yaw)
+            sin_yaw = math.sin(yaw)
+            self.scan_obstacle_points = np.column_stack((
+                pose.position.x + cos_yaw * local_x - sin_yaw * local_y,
+                pose.position.y + sin_yaw * local_x + cos_yaw * local_y,
+            )).astype(np.float32)
+            self.scan_received = True
+            self.path_replan_requested = True
+
         if self.goal is None:
             return
         front_ranges = []
@@ -98,6 +139,25 @@ class HuskyMotion(Node):
         nearest_front_range = min(front_ranges, default=math.inf)
         if nearest_front_range > self.obstacle_distance or self.obstacle_detected:
             return
+        pose = self.odom.pose.pose if self.odom is not None else None
+        if pose is not None and self.goal is not None:
+            candidate_path = plan_path(
+                pose.position.x,
+                pose.position.y,
+                np.array([self.goal.point.x, self.goal.point.y], dtype=np.float32),
+                self.scan_obstacle_points,
+                resolution=self.path_resolution,
+                robot_clearance=self.robot_clearance,
+            )
+            if candidate_path.size:
+                self.path = candidate_path
+                self.path_index = 0
+                self.path_replan_requested = False
+                self.get_logger().warn(
+                    f'Obstacle at {nearest_front_range:.2f} m; following '
+                    'replanned path.'
+                )
+                return
         self.obstacle_detected = True
         self.goal = None
         self.stop()
@@ -165,6 +225,9 @@ class HuskyMotion(Node):
         self.goal = message
         self.goal_started = time.monotonic()
         self.obstacle_detected = False
+        self.path = np.empty((0, 2), dtype=np.float32)
+        self.path_index = 0
+        self.path_replan_requested = True
         clear_event = Bool()
         clear_event.data = False
         self.obstacle_stop_publisher.publish(clear_event)
@@ -201,14 +264,44 @@ class HuskyMotion(Node):
 
         pose = self.odom.pose.pose
         target = self.goal.point
-        dx = target.x - pose.position.x
-        dy = target.y - pose.position.y
-        distance = math.hypot(dx, dy)
+        position = np.array([pose.position.x, pose.position.y], dtype=np.float32)
+        goal = np.array([target.x, target.y], dtype=np.float32)
+        distance = float(np.linalg.norm(goal - position))
         if distance <= self.position_tolerance:
             self.get_logger().info(f'Arrived: {distance:.3f} m from target.')
             self.goal = None
             self.stop()
             return
+
+        if not self.scan_received:
+            self.get_logger().warn('Waiting for lidar before moving.', throttle_duration_sec=2.0)
+            self.stop()
+            return
+        if self.path_replan_requested or not self.path.size:
+            self.path = plan_path(
+                pose.position.x,
+                pose.position.y,
+                goal,
+                self.scan_obstacle_points,
+                resolution=self.path_resolution,
+                robot_clearance=self.robot_clearance,
+            )
+            self.path_index = 0
+            self.path_replan_requested = False
+            if not self.path.size:
+                self.get_logger().error('No collision-free path to goal; movement cancelled.')
+                self.goal = None
+                self.stop()
+                return
+
+        while self.path_index < len(self.path) - 1:
+            if np.linalg.norm(self.path[self.path_index] - position) <= 0.35:
+                self.path_index += 1
+            else:
+                break
+        path_target = self.path[self.path_index]
+        dx = float(path_target[0] - position[0])
+        dy = float(path_target[1] - position[1])
 
         heading = quaternion_yaw((
             pose.orientation.x,

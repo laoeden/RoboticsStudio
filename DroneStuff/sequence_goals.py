@@ -11,12 +11,7 @@ from geometry_msgs.msg import PointStamped
 from nav_msgs.msg import Odometry
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
-from sensor_msgs.msg import LaserScan
 from std_msgs.msg import Bool
-
-
-HUSKY_FRONT_ANGLE = math.pi / 4.0
-HUSKY_COLLISION_DISTANCE = 1.0
 
 
 @dataclass(frozen=True)
@@ -48,33 +43,12 @@ class GoalSequence(Node):
                 self._on_obstacle_stop,
                 qos_profile_sensor_data,
             )
-            self.create_subscription(
-                LaserScan,
-                'scan',
-                self._on_scan,
-                qos_profile_sensor_data,
-            )
 
     def _on_odometry(self, message: Odometry) -> None:
         self.odometry = message
 
     def _on_obstacle_stop(self, message: Bool) -> None:
         if message.data:
-            self.obstacle_stopped = True
-
-    def _on_scan(self, message: LaserScan) -> None:
-        front_ranges = []
-        for index, distance in enumerate(message.ranges):
-            angle = (
-                message.angle_min + index * message.angle_increment + math.pi
-            ) % (2.0 * math.pi) - math.pi
-            if (
-                abs(angle) <= HUSKY_FRONT_ANGLE
-                and math.isfinite(distance)
-                and message.range_min <= distance <= message.range_max
-            ):
-                front_ranges.append(distance)
-        if min(front_ranges, default=math.inf) <= HUSKY_COLLISION_DISTANCE:
             self.obstacle_stopped = True
 
     def wait_for_connections(self, timeout: float) -> None:

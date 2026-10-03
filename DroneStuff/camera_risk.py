@@ -18,6 +18,9 @@ CX = 360.0
 CY = 240.0
 MIN_CONTOUR_AREA = 100.0
 MIN_OBJECT_AREA_M2 = 1.0
+TEXTURE_KERNEL_SIZE = 7
+MIN_TEXTURE_VARIANCE = 180.0
+MIN_TEXTURE_FRACTION = 0.35
 MIN_DEPTH_M = 0.4
 MAX_DEPTH_M = 10.0
 
@@ -35,6 +38,8 @@ def create_trackbars(window_name: str) -> None:
 		('Hue tolerance %', MAX_TOLERANCE),
 		('Saturation tolerance %', MAX_TOLERANCE),
 		('Value tolerance %', MAX_TOLERANCE),
+		('Texture variance', 1000),
+		('Texture fraction %', 100),
 	):
 		cv2.createTrackbar(name, window_name, 0, maximum, nothing)
 
@@ -43,6 +48,10 @@ def create_trackbars(window_name: str) -> None:
 	cv2.setTrackbarPos('Hue tolerance %', window_name, 10)
 	cv2.setTrackbarPos('Saturation tolerance %', window_name, 10)
 	cv2.setTrackbarPos('Value tolerance %', window_name, 10)
+	cv2.setTrackbarPos('Texture variance', window_name, int(MIN_TEXTURE_VARIANCE))
+	cv2.setTrackbarPos(
+		'Texture fraction %', window_name, int(MIN_TEXTURE_FRACTION * 100)
+	)
 
 
 def build_mask(image: np.ndarray, window_name: str) -> np.ndarray:
@@ -98,6 +107,29 @@ def build_mask(image: np.ndarray, window_name: str) -> np.ndarray:
 	return mask
 
 
+def build_texture_mask(
+	image: np.ndarray,
+	window_name: str,
+) -> np.ndarray:
+	if image.ndim == 2:
+		gray_image = image.astype(np.float32)
+	else:
+		gray_image = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY).astype(np.float32)
+	mean = cv2.GaussianBlur(
+		gray_image,
+		(TEXTURE_KERNEL_SIZE, TEXTURE_KERNEL_SIZE),
+		0,
+	)
+	mean_squared = cv2.GaussianBlur(
+		gray_image * gray_image,
+		(TEXTURE_KERNEL_SIZE, TEXTURE_KERNEL_SIZE),
+		0,
+	)
+	variance = np.maximum(mean_squared - mean * mean, 0.0)
+	minimum_variance = cv2.getTrackbarPos('Texture variance', window_name)
+	return np.where(variance >= minimum_variance, 255, 0).astype(np.uint8)
+
+
 def camera_to_base(point: np.ndarray) -> np.ndarray:
 	"""Transform a point from the depth optical frame into parrot base frame."""
 	# URDF: base -> camera_link -> camera_depth_frame -> optical frame.
@@ -151,8 +183,12 @@ def quaternion_yaw(quaternion: np.ndarray) -> float:
 def find_objects(
 	mask: np.ndarray,
 	depth: np.ndarray,
+	texture_mask: np.ndarray | None = None,
+	minimum_texture_fraction: float = MIN_TEXTURE_FRACTION,
 ) -> list[tuple[np.ndarray, tuple[int, int, int, int], tuple[int, int], np.ndarray | None]]:
 	if depth.shape[:2] != mask.shape[:2]:
+		return []
+	if texture_mask is not None and texture_mask.shape != mask.shape:
 		return []
 	contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 	contours = [contour for contour in contours if cv2.contourArea(contour) >= MIN_CONTOUR_AREA]
@@ -162,6 +198,13 @@ def find_objects(
 		center = (x + width // 2, y + height // 2)
 		contour_mask = np.zeros(mask.shape, dtype=np.uint8)
 		cv2.drawContours(contour_mask, [contour], -1, 255, thickness=-1)
+		if texture_mask is not None:
+			contour_pixels = contour_mask > 0
+			textured_fraction = np.count_nonzero(
+				texture_mask[contour_pixels]
+			) / np.count_nonzero(contour_pixels)
+			if textured_fraction < minimum_texture_fraction:
+				continue
 		valid_depth = depth[(contour_mask > 0) & np.isfinite(depth)]
 		valid_depth = valid_depth[(valid_depth >= MIN_DEPTH_M) & (valid_depth <= MAX_DEPTH_M)]
 		point = None
@@ -192,13 +235,22 @@ def find_world_points(
 	if image.ndim == 2:
 		image = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
 	mask = build_mask(image, window_name)
+	texture_mask = build_texture_mask(image, window_name)
+	minimum_texture_fraction = cv2.getTrackbarPos(
+		'Texture fraction %', window_name
+	) / 100.0
 	quaternion = np.array([
 		odom.pose.pose.orientation.x,
 		odom.pose.pose.orientation.y,
 		odom.pose.pose.orientation.z,
 		odom.pose.pose.orientation.w,
 	])
-	objects = find_objects(mask, depth)
+	objects = find_objects(
+		mask,
+		depth,
+		texture_mask,
+		minimum_texture_fraction,
+	)
 	world_points = []
 	for _, _, _, camera_point in objects:
 		if camera_point is None:
@@ -224,8 +276,22 @@ def build_display(
 	if image.ndim == 2:
 		image = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
 	mask = build_mask(image, window_name)
-	masked_image = cv2.bitwise_and(image, image, mask=mask)
-	objects = find_objects(mask, depth) if depth is not None else []
+	texture_mask = build_texture_mask(image, window_name)
+	minimum_texture_fraction = cv2.getTrackbarPos(
+		'Texture fraction %', window_name
+	) / 100.0
+	filtered_mask = cv2.bitwise_and(mask, texture_mask)
+	masked_image = cv2.bitwise_and(image, image, mask=filtered_mask)
+	objects = (
+		find_objects(
+			mask,
+			depth,
+			texture_mask,
+			minimum_texture_fraction,
+		)
+		if depth is not None
+		else []
+	)
 	if odom is None:
 		cv2.putText(
 			masked_image,
@@ -292,7 +358,7 @@ class HuskyCameraViewer(Node):
 		self.declare_parameter('husky_goal_topic', '/husky1/goal')
 		self.declare_parameter('husky_odom_topic', '/husky1/odometry')
 		self.declare_parameter('husky_goal_frame', 'husky1_odom')
-		self.declare_parameter('duplicate_radius', 0.5)
+		self.declare_parameter('duplicate_radius', 1.0)
 		self.declare_parameter('husky_goal_tolerance', 0.2)
 		self.window_name = 'Husky camera'
 		self.depth_image = None
@@ -385,6 +451,12 @@ class HuskyCameraViewer(Node):
 			rclpy.shutdown()
 
 	def publish_new_locations(self, image: np.ndarray) -> None:
+		known_locations = [
+			location[:2] for location in self.published_locations
+		]
+		known_locations.extend(location[:2] for location in self.pending_locations)
+		if self.active_location is not None:
+			known_locations.append(self.active_location[:2])
 		for world_point in find_world_points(
 			image,
 			self.depth_image,
@@ -392,11 +464,12 @@ class HuskyCameraViewer(Node):
 			self.odom,
 		):
 			if any(
-				np.linalg.norm(world_point - old_point) < self.duplicate_radius
-				for old_point in self.published_locations
+				np.linalg.norm(world_point[:2] - old_point) < self.duplicate_radius
+				for old_point in known_locations
 			):
 				continue
 			self.published_locations.append(world_point.copy())
+			known_locations.append(world_point[:2].copy())
 			self.get_logger().info(
 				'Queued new Husky contour goal at '
 				f'({world_point[0]:.2f}, {world_point[1]:.2f}).'
