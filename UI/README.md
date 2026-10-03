@@ -32,3 +32,7 @@ Positions are estimates using the current Parrot camera calibration and median
 patch depth. This feature records locations only; it does not send Husky goals.
 Before sending a recorded point later, transform it from its saved source frame
 to the Husky controller's coordinate frame.
+
+Use **CLEAR PINPOINTS** at the bottom right of MAIN to remove all grass markers,
+pending detections, and the saved coordinate file. Recording pauses after clearing;
+re-enable **Automatically pin dry grass** in CAMERA RISK to start a new survey.

@@ -59,6 +59,13 @@ class GrassPinpoints:
             self.save()
         return added
 
+    def clear(self):
+        """Remove the persisted survey before resetting in-memory detections."""
+        self.path.unlink(missing_ok=True)
+        self.pins.clear()
+        self.candidates.clear()
+        self.load_error = None
+
     def save(self):
         temporary = self.path.with_suffix('.tmp')
         temporary.write_text(json.dumps({'version': 1, 'pins': self.pins}, indent=2) + '\n')

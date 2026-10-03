@@ -1135,6 +1135,32 @@ tk.Label(
 ).pack(anchor="w", padx=15, pady=10)
 
 
+def clear_grass_pinpoints():
+    global last_pinpoint_stamp
+    try:
+        grass_pinpoints.clear()
+    except OSError as error:
+        pinpoint_status.config(text=f"Could not clear saved pins: {error}")
+        add_log("GRASS", f"Could not clear saved pins: {error}")
+        return
+    auto_pinpoints.set(False)
+    last_pinpoint_stamp = None
+    for marker, label in pinpoint_items.values():
+        canvas.delete(marker)
+        canvas.delete(label)
+    pinpoint_items.clear()
+    pinpoint_status.config(text="Pinning paused | Saved: 0")
+    add_log("GRASS", "Cleared all pinpoints and saved coordinates; pinning paused")
+
+
+tk.Button(
+    right, text="CLEAR PINPOINTS", command=clear_grass_pinpoints,
+    bg=PANEL_2, fg=AMBER, activebackground=PANEL, activeforeground=TEXT,
+    highlightbackground=BORDER, font=("DejaVu Sans Mono", 9, "bold"),
+    pady=10,
+).pack(side="bottom", fill="x", padx=12, pady=15)
+
+
 # =========================================================
 # FOOTER
 # =========================================================

@@ -41,6 +41,27 @@ class GrassPinpointTests(unittest.TestCase):
         self.assertEqual(len(self.tracker.pins), 3)
         self.assertEqual([p['id'] for p in self.tracker.pins], [1, 2, 3])
 
+    def test_clear_removes_saved_and_pending_sightings(self):
+        for stamp in (1, 1.1, 1.2):
+            self.tracker.observe([(2, 3, 0)], 'odom', stamp)
+        self.tracker.observe([(6, 3, 0)], 'odom', 1.3)
+        self.tracker.clear()
+        self.assertFalse(self.path.exists())
+        self.assertEqual(self.tracker.pins, [])
+        self.assertEqual(self.tracker.candidates, [])
+        self.assertEqual(GrassPinpoints(self.path).pins, [])
+        self.tracker.clear()  # Clearing an empty survey is safe.
+        for stamp in (2, 2.1, 2.2):
+            self.tracker.observe([(2, 3, 0)], 'odom', stamp)
+        self.assertEqual(self.tracker.pins[0]['id'], 1)
+
+    def test_clear_recovers_invalid_saved_file(self):
+        self.path.write_text('{broken')
+        tracker = GrassPinpoints(self.path)
+        tracker.clear()
+        self.assertIsNone(tracker.load_error)
+        self.assertFalse(self.path.exists())
+
     def test_invalid_saved_file_is_not_overwritten(self):
         self.path.write_text('{broken')
         tracker = GrassPinpoints(self.path)
