@@ -1,4 +1,5 @@
 import tkinter as tk
+from tkinter import ttk
 from datetime import datetime
 import math
 import threading
@@ -8,9 +9,14 @@ from rclpy.node import Node
 from std_msgs.msg import String
 from nav_msgs.msg import Odometry
 from sensor_msgs.msg import Image as RosImage
+from sensor_msgs.msg import LaserScan
 from cv_bridge import CvBridge
 import cv2
+import numpy as np
 from PIL import Image as PILImage, ImageTk
+
+from matplotlib.figure import Figure
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 
 from geometry_msgs.msg import PointStamped
 
@@ -46,10 +52,13 @@ ros_node = Node("farmer_control_station")
 bridge = CvBridge()
 latest_rgb = None
 rgb_frame_count = 0
+latest_depth = None
 
 ugv_x = None
 ugv_y = None
 ugv_heading = None
+
+latest_lidar_scan = None
 
 uav_x = None
 uav_y = None
@@ -62,15 +71,33 @@ spiral_index = 0
 estop_active = False
 
 def odometry_callback(msg):
-    global ugv_x, ugv_y
+    global ugv_x, ugv_y, ugv_heading
 
     ugv_x = msg.pose.pose.position.x
     ugv_y = msg.pose.pose.position.y
+
+    q = msg.pose.pose.orientation
+
+    ugv_heading = math.atan2(
+        2.0 * (q.w * q.z + q.x * q.y),
+        1.0 - 2.0 * (q.y * q.y + q.z * q.z)
+    )
     
 odom_sub = ros_node.create_subscription(
     Odometry,
     "/husky1/odometry",
     odometry_callback,
+    10
+)
+
+def lidar_callback(msg):
+    global latest_lidar_scan
+    latest_lidar_scan = msg
+
+lidar_sub = ros_node.create_subscription(
+    LaserScan,
+    "/husky1/scan",
+    lidar_callback,
     10
 )
 
@@ -107,6 +134,47 @@ rgb_sub = ros_node.create_subscription(
     10
 )
 
+def depth_callback(msg):
+    global latest_depth
+
+    try:
+        if msg.encoding == "32FC1":
+            dtype = np.float32
+        elif msg.encoding == "16UC1":
+            dtype = np.uint16
+        else:
+            ros_node.get_logger().error(
+                f"Unsupported depth encoding: {msg.encoding}"
+            )
+            return
+
+        bytes_per_pixel = np.dtype(dtype).itemsize
+
+        depth = np.frombuffer(
+            msg.data,
+            dtype=dtype
+        ).reshape(
+            msg.height,
+            msg.step // bytes_per_pixel
+        )[:, :msg.width].copy()
+
+        if msg.encoding == "16UC1":
+            depth = depth.astype(np.float32) / 1000.0
+
+        latest_depth = depth
+
+    except Exception as error:
+        ros_node.get_logger().error(
+            f"Depth conversion failed: {error}"
+        )
+
+
+depth_sub = ros_node.create_subscription(
+    RosImage,
+    "/parrot1/camera/depth/image",
+    depth_callback,
+    10
+)
 
 def ros_spin():
     rclpy.spin(ros_node)
@@ -350,13 +418,164 @@ tk.Label(
     font=("DejaVu Sans Mono", 9)
 ).pack(anchor="e")
 
+# =========================================================
+# TABBED INTERFACE
+# =========================================================
+
+notebook = ttk.Notebook(root)
+notebook.pack(fill="both", expand=True, padx=8, pady=(0, 8))
+
+main_tab = tk.Frame(notebook, bg=BG)
+lidar_tab = tk.Frame(notebook, bg=BG)
+camera_risk_tab = tk.Frame(notebook, bg=BG)
+
+notebook.add(main_tab, text="MAIN")
+notebook.add(lidar_tab, text="HUSKY LIDAR")
+notebook.add(camera_risk_tab, text="CAMERA RISK")
+
+# =========================================================
+# HUSKY LIDAR TAB
+# =========================================================
+
+lidar_figure = Figure(figsize=(13, 6), dpi=100)
+
+lidar_axis = lidar_figure.add_subplot(121, projection="polar")
+lidar_map_axis = lidar_figure.add_subplot(122)
+
+lidar_axis.set_theta_zero_location("E")
+lidar_axis.set_theta_direction(1)
+lidar_axis.set_title(
+    "Husky 360 lidar | front +/-45 deg | collision distance 1.0 m"
+)
+lidar_axis.set_rmax(15.0)
+
+lidar_points, = lidar_axis.plot(
+    [],
+    [],
+    ".",
+    markersize=3
+)
+
+lidar_map_axis.set_title("Current lidar obstacles and planned path")
+lidar_map_axis.set_xlabel("world X (m)")
+lidar_map_axis.set_ylabel("world Y (m)")
+lidar_map_axis.set_aspect("equal", adjustable="datalim")
+lidar_map_axis.grid(True, alpha=0.3)
+
+lidar_map_points, = lidar_map_axis.plot(
+    [],
+    [],
+    ".",
+    markersize=4,
+    label="current lidar"
+)
+
+lidar_map_axis.legend(loc="upper right")
+
+lidar_canvas = FigureCanvasTkAgg(
+    lidar_figure,
+    master=lidar_tab
+)
+
+lidar_canvas.get_tk_widget().pack(
+    fill="both",
+    expand=True,
+    padx=8,
+    pady=8
+)
+
+lidar_canvas.draw()
+
+# =========================================================
+# CAMERA RISK TAB
+# =========================================================
+
+camera_risk_main = tk.Frame(camera_risk_tab, bg=BG)
+camera_risk_main.pack(fill="both", expand=True, padx=10, pady=10)
+
+camera_risk_main.grid_columnconfigure(0, weight=1)
+camera_risk_main.grid_columnconfigure(1, weight=0)
+camera_risk_main.grid_rowconfigure(0, weight=1)
+
+camera_risk_display = tk.Label(
+    camera_risk_main,
+    text="CAMERA RISK FEED WAITING",
+    bg="#050805",
+    fg=TEXT_DIM,
+    font=("DejaVu Sans Mono", 12)
+)
+camera_risk_display.grid(
+    row=0,
+    column=0,
+    sticky="nsew",
+    padx=(0, 10)
+)
+
+camera_risk_controls = tk.Frame(
+    camera_risk_main,
+    bg=PANEL,
+    width=320,
+    highlightbackground=BORDER,
+    highlightthickness=1
+)
+camera_risk_controls.grid(
+    row=0,
+    column=1,
+    sticky="ns"
+)
+camera_risk_controls.grid_propagate(False)
+
+tk.Label(
+    camera_risk_controls,
+    text="CAMERA RISK CONTROLS",
+    bg=PANEL,
+    fg=GREEN_BRIGHT,
+    font=("DejaVu Sans Mono", 11, "bold")
+).pack(anchor="w", padx=15, pady=15)
+
+def risk_slider(label, minimum, maximum, default):
+    tk.Label(
+        camera_risk_controls,
+        text=label,
+        bg=PANEL,
+        fg=TEXT,
+        font=("DejaVu Sans Mono", 9)
+    ).pack(anchor="w", padx=15, pady=(8, 0))
+
+    slider = tk.Scale(
+        camera_risk_controls,
+        from_=minimum,
+        to=maximum,
+        orient="horizontal",
+        bg=PANEL,
+        fg=TEXT,
+        highlightthickness=0,
+        length=280
+    )
+
+    slider.set(default)
+    slider.pack(padx=15)
+
+    return slider
+
+
+risk_hue = risk_slider("Hue", 0, 179, 0)
+risk_saturation = risk_slider("Saturation", 0, 255, 128)
+risk_value = risk_slider("Value", 0, 255, 128)
+
+risk_hue_tolerance = risk_slider("Hue tolerance %", 0, 50, 10)
+risk_saturation_tolerance = risk_slider("Saturation tolerance %", 0, 50, 10)
+risk_value_tolerance = risk_slider("Value tolerance %", 0, 50, 10)
+
+risk_texture_variance = risk_slider("Texture variance", 0, 1000, 180)
+risk_texture_fraction = risk_slider("Texture fraction %", 0, 100, 35)
 
 # =========================================================
 # MAIN AREA
 # =========================================================
 
-main = tk.Frame(root, bg=BG)
-main.pack(fill="both", expand=True, padx=8, pady=(0, 8))
+main = tk.Frame(main_tab, bg=BG)
+main.pack(fill="both", expand=True)
 
 main.grid_columnconfigure(1, weight=1)
 main.grid_rowconfigure(0, weight=1)
@@ -1042,6 +1261,367 @@ def update_telemetry_ui():
     root.after(100, update_telemetry_ui)
 
 
+def update_lidar_ui():
+    if latest_lidar_scan is not None:
+        ranges = latest_lidar_scan.ranges
+
+        angles = [
+            latest_lidar_scan.angle_min
+            + i * latest_lidar_scan.angle_increment
+            for i in range(len(ranges))
+        ]
+
+        valid_angles = []
+        valid_ranges = []
+
+        for angle, distance in zip(angles, ranges):
+            if (
+                math.isfinite(distance)
+                and distance >= latest_lidar_scan.range_min
+                and distance <= min(latest_lidar_scan.range_max, 15.0)
+            ):
+                valid_angles.append(angle)
+                valid_ranges.append(distance)
+
+        lidar_points.set_data(
+            valid_angles,
+            valid_ranges
+        )
+
+        # Convert LiDAR points into world coordinates
+        if ugv_x is not None and ugv_y is not None and ugv_heading is not None:
+            world_x = []
+            world_y = []
+
+            cos_yaw = math.cos(ugv_heading)
+            sin_yaw = math.sin(ugv_heading)
+
+            for angle, distance in zip(valid_angles, valid_ranges):
+                local_x = distance * math.cos(angle)
+                local_y = distance * math.sin(angle)
+
+                x = ugv_x + cos_yaw * local_x - sin_yaw * local_y
+                y = ugv_y + sin_yaw * local_x + cos_yaw * local_y
+
+                world_x.append(x)
+                world_y.append(y)
+
+            lidar_map_points.set_data(
+                world_x,
+                world_y
+            )
+
+            lidar_map_axis.relim()
+            lidar_map_axis.autoscale_view()
+
+        lidar_canvas.draw_idle()
+
+    root.after(100, update_lidar_ui)
+
+def update_camera_risk_ui():
+    if latest_rgb is not None:
+        try:
+            image = latest_rgb.copy()
+
+            hsv_image = cv2.cvtColor(
+                image,
+                cv2.COLOR_BGR2HSV
+            )
+
+            hue = risk_hue.get()
+            saturation = risk_saturation.get()
+            value = risk_value.get()
+
+            hue_tolerance = risk_hue_tolerance.get()
+            saturation_tolerance = risk_saturation_tolerance.get()
+            value_tolerance = risk_value_tolerance.get()
+
+            hue_delta = int(
+                round(179 * hue_tolerance / 100)
+            )
+
+            low_hue = hue - hue_delta
+            high_hue = hue + hue_delta
+
+            low_saturation = max(
+                0,
+                saturation - round(
+                    255 * saturation_tolerance / 100
+                )
+            )
+
+            high_saturation = min(
+                255,
+                saturation + round(
+                    255 * saturation_tolerance / 100
+                )
+            )
+
+            low_value = max(
+                0,
+                value - round(
+                    255 * value_tolerance / 100
+                )
+            )
+
+            high_value = min(
+                255,
+                value + round(
+                    255 * value_tolerance / 100
+                )
+            )
+
+            if low_hue < 0:
+                mask = cv2.inRange(
+                    hsv_image,
+                    np.array([
+                        0,
+                        low_saturation,
+                        low_value
+                    ]),
+                    np.array([
+                        high_hue,
+                        high_saturation,
+                        high_value
+                    ])
+                )
+
+                mask |= cv2.inRange(
+                    hsv_image,
+                    np.array([
+                        180 + low_hue,
+                        low_saturation,
+                        low_value
+                    ]),
+                    np.array([
+                        179,
+                        high_saturation,
+                        high_value
+                    ])
+                )
+
+            elif high_hue > 179:
+                mask = cv2.inRange(
+                    hsv_image,
+                    np.array([
+                        low_hue,
+                        low_saturation,
+                        low_value
+                    ]),
+                    np.array([
+                        179,
+                        high_saturation,
+                        high_value
+                    ])
+                )
+
+                mask |= cv2.inRange(
+                    hsv_image,
+                    np.array([
+                        0,
+                        low_saturation,
+                        low_value
+                    ]),
+                    np.array([
+                        high_hue - 180,
+                        high_saturation,
+                        high_value
+                    ])
+                )
+
+            else:
+                mask = cv2.inRange(
+                    hsv_image,
+                    np.array([
+                        low_hue,
+                        low_saturation,
+                        low_value
+                    ]),
+                    np.array([
+                        high_hue,
+                        high_saturation,
+                        high_value
+                    ])
+                )
+
+            # Texture filtering
+            gray = cv2.cvtColor(
+                image,
+                cv2.COLOR_BGR2GRAY
+            ).astype(np.float32)
+
+            mean = cv2.GaussianBlur(
+                gray,
+                (7, 7),
+                0
+            )
+
+            mean_squared = cv2.GaussianBlur(
+                gray * gray,
+                (7, 7),
+                0
+            )
+
+            variance = np.maximum(
+                mean_squared - mean * mean,
+                0.0
+            )
+
+            texture_mask = np.where(
+                variance >= risk_texture_variance.get(),
+                255,
+                0
+            ).astype(np.uint8)
+
+            filtered_mask = cv2.bitwise_and(
+                mask,
+                texture_mask
+            )
+
+            processed = cv2.bitwise_and(
+                image,
+                image,
+                mask=filtered_mask
+            )
+
+            # Find candidate risk regions
+            contours, _ = cv2.findContours(
+                mask,
+                cv2.RETR_EXTERNAL,
+                cv2.CHAIN_APPROX_SIMPLE
+            )
+
+            minimum_texture_fraction = (
+                risk_texture_fraction.get() / 100.0
+            )
+
+            for contour in contours:
+
+                if cv2.contourArea(contour) < 100.0:
+                    continue
+
+                x, y, width, height = cv2.boundingRect(contour)
+
+                contour_mask = np.zeros(
+                    mask.shape,
+                    dtype=np.uint8
+                )
+
+                cv2.drawContours(
+                    contour_mask,
+                    [contour],
+                    -1,
+                    255,
+                    thickness=-1
+                )
+
+                contour_pixels = contour_mask > 0
+
+                pixel_count = np.count_nonzero(
+                    contour_pixels
+                )
+
+                if pixel_count == 0:
+                    continue
+
+                textured_fraction = (
+                    np.count_nonzero(
+                        texture_mask[contour_pixels]
+                    )
+                    / pixel_count
+                )
+
+                if textured_fraction < minimum_texture_fraction:
+                    continue
+
+                if (
+                    latest_depth is not None
+                    and latest_depth.shape[:2] == mask.shape[:2]
+                ):
+                    valid_depth = latest_depth[
+                        contour_pixels
+                        & np.isfinite(latest_depth)
+                    ]
+
+                    valid_depth = valid_depth[
+                        (valid_depth >= 0.4)
+                        & (valid_depth <= 10.0)
+                    ]
+
+                    if valid_depth.size == 0:
+                        continue
+
+                    depth_m = float(
+                        np.median(valid_depth)
+                    )
+
+                    projected_area_m2 = (
+                        cv2.contourArea(contour)
+                        * depth_m ** 2
+                        / (207.85 * 207.85)
+                    )
+
+                    if projected_area_m2 < 0.05:
+                        continue
+
+                    label = f"{depth_m:.2f} m"
+
+                else:
+                    label = "depth unavailable"
+
+                cv2.rectangle(
+                    processed,
+                    (x, y),
+                    (x + width, y + height),
+                    (0, 255, 0),
+                    2
+                )
+
+                cv2.putText(
+                    processed,
+                    label,
+                    (x, max(20, y - 5)),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.5,
+                    (0, 255, 0),
+                    2
+                )
+
+            processed = cv2.cvtColor(
+                processed,
+                cv2.COLOR_BGR2RGB
+            )
+
+            risk_image = PILImage.fromarray(
+                processed
+            )
+
+            risk_image.thumbnail(
+                (1100, 650),
+                PILImage.LANCZOS
+            )
+
+            risk_photo = ImageTk.PhotoImage(
+                image=risk_image
+            )
+
+            camera_risk_display.config(
+                image=risk_photo,
+                text=""
+            )
+
+            camera_risk_display.image = risk_photo
+
+        except Exception as error:
+            camera_risk_display.config(
+                text=f"CAMERA RISK DISPLAY ERROR\n{error}"
+            )
+
+    root.after(100, update_camera_risk_ui)
+
+
 update_telemetry_ui()
+update_lidar_ui()
+update_camera_risk_ui()
 
 root.mainloop()
