@@ -2,6 +2,8 @@
 
 import cv2
 import math
+import threading
+import time
 import numpy as np
 
 from geometry_msgs.msg import PointStamped
@@ -185,6 +187,10 @@ def find_objects(
 	depth: np.ndarray,
 	texture_mask: np.ndarray | None = None,
 	minimum_texture_fraction: float = MIN_TEXTURE_FRACTION,
+	fx: float = FX,
+	fy: float = FY,
+	cx: float = CX,
+	cy: float = CY,
 ) -> list[tuple[np.ndarray, tuple[int, int, int, int], tuple[int, int], np.ndarray | None]]:
 	if depth.shape[:2] != mask.shape[:2]:
 		return []
@@ -211,13 +217,13 @@ def find_objects(
 		if valid_depth.size > 0:
 			depth_m = float(np.median(valid_depth))
 			projected_area_m2 = (
-				cv2.contourArea(contour) * depth_m ** 2 / (FX * FY)
+				cv2.contourArea(contour) * depth_m ** 2 / (fx * fy)
 			)
 			if projected_area_m2 < MIN_OBJECT_AREA_M2:
 				continue
 			point = np.array([
-				(center[0] - CX) * depth_m / FX,
-				(center[1] - CY) * depth_m / FY,
+				(center[0] - cx) * depth_m / fx,
+				(center[1] - cy) * depth_m / fy,
 				depth_m,
 			])
 		objects.append((contour, (x, y, width, height), center, point))
@@ -229,9 +235,13 @@ def find_world_points(
 	depth: np.ndarray | None,
 	window_name: str,
 	odom: Odometry | None,
+	scale: float = 1.0,
 ) -> list[np.ndarray]:
 	if depth is None or odom is None:
 		return []
+	if scale != 1.0:
+		image = cv2.resize(image, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
+		depth = cv2.resize(depth, None, fx=scale, fy=scale, interpolation=cv2.INTER_NEAREST)
 	if image.ndim == 2:
 		image = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
 	mask = build_mask(image, window_name)
@@ -250,6 +260,10 @@ def find_world_points(
 		depth,
 		texture_mask,
 		minimum_texture_fraction,
+		fx=FX * scale,
+		fy=FY * scale,
+		cx=CX * scale,
+		cy=CY * scale,
 	)
 	world_points = []
 	for _, _, _, camera_point in objects:
@@ -272,7 +286,12 @@ def build_display(
 	depth: np.ndarray | None,
 	window_name: str,
 	odom: Odometry | None,
+	scale: float = 1.0,
 ) -> np.ndarray:
+	if scale != 1.0:
+		image = cv2.resize(image, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
+		if depth is not None:
+			depth = cv2.resize(depth, None, fx=scale, fy=scale, interpolation=cv2.INTER_NEAREST)
 	if image.ndim == 2:
 		image = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
 	mask = build_mask(image, window_name)
@@ -288,6 +307,10 @@ def build_display(
 			depth,
 			texture_mask,
 			minimum_texture_fraction,
+			fx=FX * scale,
+			fy=FY * scale,
+			cx=CX * scale,
+			cy=CY * scale,
 		)
 		if depth is not None
 		else []
@@ -315,35 +338,15 @@ def build_display(
 			f'x={pose.position.x:.2f} y={pose.position.y:.2f} '
 			f'z={pose.position.z:.2f} yaw={math.degrees(quaternion_yaw(quaternion)):.1f} deg'
 		)
-		cv2.putText(
-			masked_image,
-			odom_label,
-			(10, 30),
-			cv2.FONT_HERSHEY_SIMPLEX,
-			0.55,
-			(255, 255, 0),
-			2,
-		)
-	for index, (_, (x, y, width, height), center, camera_point) in enumerate(objects, start=1):
+		cv2.putText(masked_image, odom_label, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 0), 2)
+	for index, (_, (x, y, width, height), _, camera_point) in enumerate(objects, start=1):
 		cv2.rectangle(masked_image, (x, y), (x + width, y + height), (0, 255, 0), 2)
 		label = f'#{index}: depth unavailable'
 		if odom is not None and camera_point is not None:
 			base_point = camera_to_base(camera_point)
-			world_point = rotate_by_quaternion(
-				base_point,
-				quaternion,
-			) + np.array([pose.position.x, pose.position.y, pose.position.z])
+			world_point = rotate_by_quaternion(base_point, quaternion) + np.array([pose.position.x, pose.position.y, pose.position.z])
 			label = f'#{index}: ({world_point[0]:.2f}, {world_point[1]:.2f}, {world_point[2]:.2f}) m'
-		text_y = max(18, y - 6)
-		cv2.putText(
-			masked_image,
-			label,
-			(x, text_y),
-			cv2.FONT_HERSHEY_SIMPLEX,
-			0.45,
-			(0, 255, 0),
-			2,
-		)
+		cv2.putText(masked_image, label, (x, max(18, y - 6)), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 255, 0), 2)
 	return np.hstack((image, masked_image))
 
 
@@ -357,23 +360,34 @@ class HuskyCameraViewer(Node):
 		self.declare_parameter('odom_topic', '/parrot1/odometry')
 		self.declare_parameter('husky_goal_topic', '/husky1/goal')
 		self.declare_parameter('husky_odom_topic', '/husky1/odometry')
-		self.declare_parameter('husky_goal_frame', 'husky1_odom')
+		self.declare_parameter('husky_goal_frame', 'husky1/odom')
 		self.declare_parameter('duplicate_radius', 1.0)
 		self.declare_parameter('husky_goal_tolerance', 0.2)
+		self.declare_parameter('display_scale', 0.5)
+		self.declare_parameter('display_fps', 20.0)
 		self.window_name = 'Husky camera'
-		self.depth_image = None
 		self.odom = None
 		self.husky_goal_frame = self.get_parameter('husky_goal_frame').value
 		self.duplicate_radius = float(self.get_parameter('duplicate_radius').value)
 		self.husky_goal_tolerance = float(
 			self.get_parameter('husky_goal_tolerance').value
 		)
-		if self.duplicate_radius <= 0 or self.husky_goal_tolerance <= 0:
-			raise ValueError('duplicate_radius and husky_goal_tolerance must be positive')
+		self.display_scale = float(self.get_parameter('display_scale').value)
+		self.display_fps = float(self.get_parameter('display_fps').value)
+		if any(value <= 0 for value in (
+			self.duplicate_radius,
+			self.husky_goal_tolerance,
+			self.display_scale,
+			self.display_fps,
+		)) or self.display_scale > 1.0:
+			raise ValueError('display_scale must be in (0, 1], other display values must be positive')
 		self.published_locations: list[np.ndarray] = []
 		self.pending_locations: list[np.ndarray] = []
 		self.active_location: np.ndarray | None = None
 		self.husky_odom = None
+		self.frame_lock = threading.Lock()
+		self.latest_image: np.ndarray | None = None
+		self.latest_depth: np.ndarray | None = None
 		self.subscription = self.create_subscription(
 			Image,
 			self.get_parameter('image_topic').value,
@@ -407,11 +421,12 @@ class HuskyCameraViewer(Node):
 			f'Subscribed to {self.get_parameter("image_topic").value}. '
 			'Press q or Escape in the camera window to quit.'
 		)
-		create_trackbars(self.window_name)
 
 	def depth_callback(self, message: Image) -> None:
 		try:
-			self.depth_image = self._depth_from_message(message)
+			depth = self._depth_from_message(message)
+			with self.frame_lock:
+				self.latest_depth = depth
 		except ValueError as error:
 			self.get_logger().error(str(error), throttle_duration_sec=2.0)
 
@@ -441,16 +456,52 @@ class HuskyCameraViewer(Node):
 			self.get_logger().error(str(error), throttle_duration_sec=2.0)
 			return
 
-		self.publish_new_locations(image)
-		cv2.imshow(
-			self.window_name,
-			build_display(image, self.depth_image, self.window_name, self.odom),
-		)
-		key = cv2.waitKey(1) & 0xFF
-		if key in (ord('q'), 27):
-			rclpy.shutdown()
+		with self.frame_lock:
+			self.latest_image = image
 
-	def publish_new_locations(self, image: np.ndarray) -> None:
+	def run_gui(self) -> None:
+		create_trackbars(self.window_name)
+		frame_period = 1.0 / self.display_fps
+		next_frame = time.monotonic()
+		while rclpy.ok():
+			now = time.monotonic()
+			if now < next_frame:
+				cv2.waitKey(max(1, int((next_frame - now) * 1000)))
+				continue
+			next_frame = now + frame_period
+			with self.frame_lock:
+				image = self.latest_image
+				depth = self.latest_depth
+			if image is not None:
+				try:
+					self.publish_new_locations(image, depth, self.display_scale)
+					cv2.imshow(
+						self.window_name,
+						build_display(
+							image,
+							depth,
+							self.window_name,
+							self.odom,
+							self.display_scale,
+						),
+					)
+				except cv2.error as error:
+					self.get_logger().error(
+						f'Camera display reset: {error}',
+						throttle_duration_sec=2.0,
+					)
+					create_trackbars(self.window_name)
+			key = cv2.waitKey(1) & 0xFF
+			if key in (ord('q'), 27):
+				rclpy.shutdown()
+				break
+
+	def publish_new_locations(
+		self,
+		image: np.ndarray,
+		depth: np.ndarray | None,
+		scale: float,
+	) -> None:
 		known_locations = [
 			location[:2] for location in self.published_locations
 		]
@@ -459,9 +510,10 @@ class HuskyCameraViewer(Node):
 			known_locations.append(self.active_location[:2])
 		for world_point in find_world_points(
 			image,
-			self.depth_image,
+			depth,
 			self.window_name,
 			self.odom,
+			scale,
 		):
 			if any(
 				np.linalg.norm(world_point[:2] - old_point) < self.duplicate_radius
@@ -545,8 +597,10 @@ class HuskyCameraViewer(Node):
 def main() -> None:
 	rclpy.init()
 	viewer = HuskyCameraViewer()
+	ros_thread = threading.Thread(target=rclpy.spin, args=(viewer,), daemon=True)
+	ros_thread.start()
 	try:
-		rclpy.spin(viewer)
+		viewer.run_gui()
 	except KeyboardInterrupt:
 		pass
 	finally:

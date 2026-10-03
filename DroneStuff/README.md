@@ -83,6 +83,15 @@ python3 DroneStuff/camera_risk.py \
   --ros-args -p duplicate_radius:=1.0
 ```
 
+The camera viewer processes and displays frames at half resolution by default
+and runs its GUI independently from ROS callbacks, so incoming frames can be
+dropped without making the sliders lag. Adjust the display workload with:
+
+```bash
+python3 DroneStuff/camera_risk.py \
+  --ros-args -p display_scale:=0.35 -p display_fps:=15
+```
+
 The Husky arrival distance can be adjusted independently with
 `husky_goal_tolerance`.
 

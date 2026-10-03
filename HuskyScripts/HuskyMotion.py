@@ -33,6 +33,12 @@ def wrap_angle(angle: float) -> float:
     return (angle + math.pi) % (2.0 * math.pi) - math.pi
 
 
+def matching_frame(first: str, second: str) -> bool:
+    if first == second:
+        return True
+    return {first, second} <= {'husky1/odom', 'husky1_odom'}
+
+
 class HuskyMotion(Node):
     def __init__(self) -> None:
         super().__init__('husky_motion', namespace='husky1')
@@ -45,6 +51,8 @@ class HuskyMotion(Node):
             'position_tolerance': 0.2,
             'odom_timeout': 5.0,
             'goal_timeout': 120.0,
+            'progress_timeout': 5.0,
+            'minimum_progress': 0.05,
             'obstacle_distance': 1.0,
             'front_angle': math.pi / 4.0,
             'planning_range': 5.0,
@@ -62,6 +70,8 @@ class HuskyMotion(Node):
         self.odom_received = 0.0
         self.goal = None
         self.goal_started = 0.0
+        self.best_goal_distance = math.inf
+        self.last_progress_time = 0.0
         self.obstacle_detected = False
         self.estop_active = False
         self.scan_obstacle_points = np.empty((0, 2), dtype=np.float32)
@@ -120,7 +130,6 @@ class HuskyMotion(Node):
                 pose.position.y + sin_yaw * local_x + cos_yaw * local_y,
             )).astype(np.float32)
             self.scan_received = True
-            self.path_replan_requested = True
 
         if self.goal is None:
             return
@@ -150,13 +159,24 @@ class HuskyMotion(Node):
                 robot_clearance=self.robot_clearance,
             )
             if candidate_path.size:
-                self.path = candidate_path
-                self.path_index = 0
-                self.path_replan_requested = False
-                self.get_logger().warn(
-                    f'Obstacle at {nearest_front_range:.2f} m; following '
-                    'replanned path.'
+                candidate_target = candidate_path[min(1, len(candidate_path) - 1)]
+                current_target = (
+                    self.path[self.path_index]
+                    if self.path.size and self.path_index < len(self.path)
+                    else None
                 )
+                needs_new_path = (
+                    current_target is None
+                    or np.linalg.norm(candidate_target - current_target) > 0.4
+                )
+                if needs_new_path:
+                    self.path = candidate_path
+                    self.path_index = 0
+                    self.path_replan_requested = False
+                    self.get_logger().warn(
+                        f'Obstacle at {nearest_front_range:.2f} m; following '
+                        'replanned path.'
+                    )
                 return
         self.obstacle_detected = True
         self.goal = None
@@ -216,14 +236,25 @@ class HuskyMotion(Node):
         ):
             self.get_logger().error('Rejected goal: waiting for fresh odometry.')
             return
-        if message.header.frame_id != self.odom.header.frame_id:
+        if not matching_frame(message.header.frame_id, self.odom.header.frame_id):
             self.get_logger().error(
                 f'Goal frame {message.header.frame_id!r} does not match '
                 f'odometry frame {self.odom.header.frame_id!r}.'
             )
             return
+        duplicate_goal = (
+            self.goal is not None
+            and math.hypot(
+                self.goal.point.x - message.point.x,
+                self.goal.point.y - message.point.y,
+            ) <= 0.05
+        )
+        if duplicate_goal:
+            return
         self.goal = message
         self.goal_started = time.monotonic()
+        self.best_goal_distance = math.inf
+        self.last_progress_time = self.goal_started
         self.obstacle_detected = False
         self.path = np.empty((0, 2), dtype=np.float32)
         self.path_index = 0
@@ -253,7 +284,7 @@ class HuskyMotion(Node):
             self.odom is None
             or now - self.odom_received > self.odom_timeout
             or now - self.goal_started > self.goal_timeout
-            or self.odom.header.frame_id != self.goal.header.frame_id
+            or not matching_frame(self.odom.header.frame_id, self.goal.header.frame_id)
         ):
             self.get_logger().error(
                 'Goal cancelled: odometry unavailable/changed or goal timed out.'
@@ -271,6 +302,21 @@ class HuskyMotion(Node):
             self.get_logger().info(f'Arrived: {distance:.3f} m from target.')
             self.goal = None
             self.stop()
+            return
+
+        if distance < self.best_goal_distance - self.minimum_progress:
+            self.best_goal_distance = distance
+            self.last_progress_time = now
+        elif now - self.last_progress_time > self.progress_timeout:
+            self.goal = None
+            self.stop()
+            event = Bool()
+            event.data = True
+            self.obstacle_stop_publisher.publish(event)
+            self.get_logger().error(
+                f'No progress toward goal for {self.progress_timeout:.1f} s; '
+                'movement cancelled.'
+            )
             return
 
         if not self.scan_received:

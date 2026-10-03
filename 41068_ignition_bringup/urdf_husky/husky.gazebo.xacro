@@ -77,12 +77,19 @@
     <material>Gazebo/Grey</material>
   </gazebo>
  
-  <!-- Move base directly without faffing around with diff drive controllers -->
+  <!-- Drive through the wheels so gravity, contact, and friction remain physical. -->
   <gazebo>
     <plugin
-      filename="ignition-gazebo-velocity-control-system"
-      name="ignition::gazebo::systems::VelocityControl">
+      filename="ignition-gazebo-diff-drive-system"
+      name="ignition::gazebo::systems::DiffDrive">
+      <left_joint>${prefix}front_left_wheel_joint</left_joint>
+      <left_joint>${prefix}rear_left_wheel_joint</left_joint>
+      <right_joint>${prefix}front_right_wheel_joint</right_joint>
+      <right_joint>${prefix}rear_right_wheel_joint</right_joint>
+      <wheel_separation>0.5708</wheel_separation>
+      <wheel_radius>0.1651</wheel_radius>
       <topic>model/${gz_model_name}/cmd_vel</topic>
+      <odom_publish_frequency>0</odom_publish_frequency>
     </plugin>
   </gazebo>
 

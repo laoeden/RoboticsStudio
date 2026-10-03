@@ -14,6 +14,12 @@ from rclpy.qos import qos_profile_sensor_data
 from std_msgs.msg import Bool
 
 
+def matching_frame(first: str, second: str) -> bool:
+    if first == second:
+        return True
+    return {first, second} <= {'husky1/odom', 'husky1_odom'}
+
+
 @dataclass(frozen=True)
 class Waypoint:
     name: str
@@ -101,7 +107,10 @@ class GoalSequence(Node):
 
             rclpy.spin_once(self, timeout_sec=0.05)
             odometry = self.odometry
-            if odometry is None or odometry.header.frame_id != self.frame:
+            if odometry is None or not matching_frame(
+                odometry.header.frame_id,
+                self.frame,
+            ):
                 continue
 
             position = odometry.pose.pose.position
@@ -170,7 +179,7 @@ def main() -> None:
 
     waypoints = [parse_waypoint(values) for values in args.waypoint]
     default_namespace = {'parrot': 'parrot1', 'husky': 'husky1'}[args.robot]
-    default_frame = {'parrot': 'parrot1_odom', 'husky': 'husky1_odom'}[args.robot]
+    default_frame = {'parrot': 'parrot1_odom', 'husky': 'husky1/odom'}[args.robot]
     tolerance = args.tolerance
     if tolerance is None:
         tolerance = {'parrot': 0.15, 'husky': 0.2}[args.robot]
