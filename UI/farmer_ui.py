@@ -5,7 +5,11 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(REPO_ROOT) not in sys.path:
     sys.path.append(str(REPO_ROOT))
 
-from DroneStuff.camera_risk import process_frame
+from DroneStuff.camera_risk import (
+    process_frame, build_mask_from_values, build_texture_mask_from_value,
+    find_objects, camera_to_base, rotate_by_quaternion, FX, FY, CX, CY,
+)
+from UI.grass_pinpoints import GrassPinpoints
 
 import tkinter as tk
 from tkinter import ttk
@@ -62,6 +66,17 @@ bridge = CvBridge()
 latest_rgb = None
 rgb_frame_count = 0
 latest_depth = None
+rgb_sample = None
+depth_sample = None
+drone_odom_sample = None
+last_pinpoint_stamp = None
+grass_pinpoints = GrassPinpoints(REPO_ROOT / "UI" / "dry_grass_pinpoints.json")
+pinpoint_items = {}
+
+
+def message_time(msg):
+    return msg.header.stamp.sec + msg.header.stamp.nanosec / 1e9
+
 
 ugv_x = None
 ugv_y = None
@@ -111,11 +126,12 @@ lidar_sub = ros_node.create_subscription(
 )
 
 def drone_odometry_callback(msg):
-    global uav_x, uav_y, uav_z
+    global uav_x, uav_y, uav_z, drone_odom_sample
 
     uav_x = msg.pose.pose.position.x
     uav_y = msg.pose.pose.position.y
     uav_z = msg.pose.pose.position.z
+    drone_odom_sample = (msg, message_time(msg))
 
 
 drone_odom_sub = ros_node.create_subscription(
@@ -127,11 +143,12 @@ drone_odom_sub = ros_node.create_subscription(
 
 
 def rgb_callback(msg):
-    global latest_rgb, rgb_frame_count
+    global latest_rgb, rgb_frame_count, rgb_sample
 
     try:
         latest_rgb = bridge.imgmsg_to_cv2(msg, desired_encoding="bgr8")
         rgb_frame_count += 1
+        rgb_sample = (latest_rgb, message_time(msg))
     except Exception as error:
         ros_node.get_logger().error(f"RGB image conversion failed: {error}")
 
@@ -144,7 +161,7 @@ rgb_sub = ros_node.create_subscription(
 )
 
 def depth_callback(msg):
-    global latest_depth
+    global latest_depth, depth_sample
 
     try:
         if msg.encoding == "32FC1":
@@ -171,6 +188,7 @@ def depth_callback(msg):
             depth = depth.astype(np.float32) / 1000.0
 
         latest_depth = depth
+        depth_sample = (depth, message_time(msg))
 
     except Exception as error:
         ros_node.get_logger().error(
@@ -549,7 +567,7 @@ def risk_slider(label, minimum, maximum, default):
         bg=PANEL,
         fg=TEXT,
         font=("DejaVu Sans Mono", 9)
-    ).pack(anchor="w", padx=15, pady=(8, 0))
+    ).pack(anchor="w", padx=15, pady=(4, 0))
 
     slider = tk.Scale(
         camera_risk_controls,
@@ -568,16 +586,28 @@ def risk_slider(label, minimum, maximum, default):
     return slider
 
 
-risk_hue = risk_slider("Hue", 0, 179, 0)
-risk_saturation = risk_slider("Saturation", 0, 255, 128)
-risk_value = risk_slider("Value", 0, 255, 128)
+risk_hue = risk_slider("Hue", 0, 179, 15)
+risk_saturation = risk_slider("Saturation", 0, 255, 180)
+risk_value = risk_slider("Value", 0, 255, 150)
 
-risk_hue_tolerance = risk_slider("Hue tolerance %", 0, 50, 10)
-risk_saturation_tolerance = risk_slider("Saturation tolerance %", 0, 50, 10)
-risk_value_tolerance = risk_slider("Value tolerance %", 0, 50, 10)
+risk_hue_tolerance = risk_slider("Hue tolerance %", 0, 50, 8)
+risk_saturation_tolerance = risk_slider("Saturation tolerance %", 0, 50, 12)
+risk_value_tolerance = risk_slider("Value tolerance %", 0, 50, 20)
 
-risk_texture_variance = risk_slider("Texture variance", 0, 1000, 180)
-risk_texture_fraction = risk_slider("Texture fraction %", 0, 100, 35)
+risk_texture_variance = risk_slider("Texture variance", 0, 1000, 0)
+risk_texture_fraction = risk_slider("Texture fraction %", 0, 100, 0)
+
+auto_pinpoints = tk.BooleanVar(value=True)
+tk.Checkbutton(
+    camera_risk_controls, text="Automatically pin dry grass", variable=auto_pinpoints,
+    bg=PANEL, fg=TEXT, selectcolor=PANEL_2, activebackground=PANEL,
+    activeforeground=TEXT,
+).pack(anchor="w", padx=15, pady=(8, 0))
+pinpoint_status = tk.Label(
+    camera_risk_controls, text=f"Saved grass pins: {len(grass_pinpoints.pins)}",
+    bg=PANEL, fg=AMBER, wraplength=280, justify="left",
+)
+pinpoint_status.pack(anchor="w", padx=15, pady=5)
 
 # =========================================================
 # MAIN AREA
@@ -1243,6 +1273,8 @@ def update_telemetry_ui():
             map_x, map_y + 25
         )
 
+    draw_grass_pinpoints()
+
     # Update RGB camera
     rendered_rgb = False
 
@@ -1327,7 +1359,74 @@ def update_lidar_ui():
 
     root.after(100, update_lidar_ui)
 
+def draw_grass_pinpoints():
+    if drone_odom_sample is None:
+        return
+    frame = drone_odom_sample[0].header.frame_id
+    for pin in grass_pinpoints.pins:
+        if pin["frame_id"] != frame:
+            continue
+        if pin["id"] not in pinpoint_items:
+            marker = canvas.create_oval(0, 0, 0, 0, fill=AMBER, outline=TEXT, width=2)
+            label = canvas.create_text(
+                0, 0, fill=AMBER, font=("DejaVu Sans Mono", 9),
+                text=f"GRASS {pin['id']}\n({pin['x']:.1f}, {pin['y']:.1f})",
+            )
+            pinpoint_items[pin["id"]] = marker, label
+        marker, label = pinpoint_items[pin["id"]]
+        x, y = world_to_map(pin["x"], pin["y"], uav_x or 0.0, uav_y or 0.0)
+        canvas.coords(marker, x - 6, y - 6, x + 6, y + 6)
+        canvas.coords(label, x, y + 24)
+
+
+def update_grass_pinpoints():
+    global last_pinpoint_stamp
+    if grass_pinpoints.load_error:
+        pinpoint_status.config(text=f"Pin file needs repair: {grass_pinpoints.load_error}")
+        return
+    if not auto_pinpoints.get():
+        pinpoint_status.config(text=f"Pinning paused | Saved: {len(grass_pinpoints.pins)}")
+        return
+    rgb, depth, odometry = rgb_sample, depth_sample, drone_odom_sample
+    if rgb is None or depth is None or odometry is None:
+        pinpoint_status.config(text="Pinning: waiting for RGB, depth and drone position")
+        return
+    stamps = [rgb[1], depth[1], odometry[1]]
+    if max(stamps) - min(stamps) > 0.25:
+        pinpoint_status.config(text="Pinning: waiting for matching camera and position data")
+        return
+    if rgb[1] == last_pinpoint_stamp:
+        return
+    last_pinpoint_stamp = rgb[1]
+    image, depth_image, odom = rgb[0], depth[0], odometry[0]
+    mask = build_mask_from_values(
+        image, risk_hue.get(), risk_saturation.get(), risk_value.get(),
+        risk_hue_tolerance.get(), risk_saturation_tolerance.get(), risk_value_tolerance.get(),
+    )
+    texture = build_texture_mask_from_value(image, risk_texture_variance.get())
+    height, width = image.shape[:2]
+    objects = find_objects(
+        mask, depth_image, texture, risk_texture_fraction.get() / 100.0,
+        fx=FX * width / 720, fy=FY * height / 480,
+        cx=CX * width / 720, cy=CY * height / 480,
+    )
+    pose = odom.pose.pose
+    q = pose.orientation
+    rotation = np.array([q.x, q.y, q.z, q.w])
+    position = np.array([pose.position.x, pose.position.y, pose.position.z])
+    points = [rotate_by_quaternion(camera_to_base(point), rotation) + position
+              for _, _, _, point in objects if point is not None]
+    added = grass_pinpoints.observe(points, odom.header.frame_id, rgb[1])
+    for pin in added:
+        add_log("GRASS", f"Pinned #{pin['id']} at ({pin['x']:.2f}, {pin['y']:.2f})")
+    pinpoint_status.config(text=f"Auto pinning | Saved grass pins: {len(grass_pinpoints.pins)}")
+
+
 def update_camera_risk_ui():
+    try:
+        update_grass_pinpoints()
+    except Exception as error:
+        pinpoint_status.config(text=f"Pinning error: {error}")
     if latest_rgb is not None:
         try:
             processed = process_frame(

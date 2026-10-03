@@ -11,3 +11,7 @@ world/WorldWithTerrian.sdf
 models/GreyHeatMap/
 
 
+
+# Saved dry-grass survey coordinates
+UI/dry_grass_pinpoints.json
+UI/dry_grass_pinpoints.tmp
