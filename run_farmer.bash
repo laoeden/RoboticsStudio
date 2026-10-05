@@ -32,9 +32,9 @@ HUSKY_PID=$!
 sleep 2
 
 # 3. Start camera risk detector
-python3 DroneStuff/camera_risk.py &
+# python3 DroneStuff/camera_risk.py &
 
-CAMERA_RISK_PID=$!
+# CAMERA_RISK_PID=$!
 
 # 4. Start FARMER control station
 python3 UI/farmer_ui.py &
