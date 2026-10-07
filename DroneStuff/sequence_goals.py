@@ -11,7 +11,10 @@ from geometry_msgs.msg import PointStamped
 from nav_msgs.msg import Odometry
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
-from std_msgs.msg import Bool
+from sensor_msgs.msg import NavSatFix
+
+
+EARTH_RADIUS_METERS = 6378137.0
 
 
 def matching_frame(first: str, second: str) -> bool:
@@ -34,7 +37,7 @@ class GoalSequence(Node):
         self.robot = robot
         self.frame = frame
         self.odometry: Odometry | None = None
-        self.obstacle_stopped = False
+        self.gps_position: tuple[float, float] | None = None
         self.publisher = self.create_publisher(PointStamped, 'goal', 10)
         self.create_subscription(
             Odometry,
@@ -44,18 +47,25 @@ class GoalSequence(Node):
         )
         if robot == 'husky':
             self.create_subscription(
-                Bool,
-                'obstacle_stop',
-                self._on_obstacle_stop,
+                NavSatFix,
+                'gps/fix',
+                self._on_gps,
                 qos_profile_sensor_data,
             )
 
     def _on_odometry(self, message: Odometry) -> None:
         self.odometry = message
 
-    def _on_obstacle_stop(self, message: Bool) -> None:
-        if message.data:
-            self.obstacle_stopped = True
+    def _on_gps(self, message: NavSatFix) -> None:
+        if not all(math.isfinite(value) for value in (
+            message.latitude,
+            message.longitude,
+        )):
+            return
+        self.gps_position = (
+            math.radians(message.longitude) * EARTH_RADIUS_METERS,
+            math.radians(message.latitude) * EARTH_RADIUS_METERS,
+        )
 
     def wait_for_connections(self, timeout: float) -> None:
         deadline = time.monotonic() + timeout
@@ -71,6 +81,11 @@ class GoalSequence(Node):
             if time.monotonic() >= deadline:
                 raise RuntimeError(f'No odometry received from the {self.robot}.')
             rclpy.spin_once(self, timeout_sec=0.1)
+        if self.robot == 'husky':
+            while self.gps_position is None:
+                if time.monotonic() >= deadline:
+                    raise RuntimeError('No GPS received from the Husky.')
+                rclpy.spin_once(self, timeout_sec=0.1)
 
     def send_waypoint(
         self,
@@ -92,11 +107,6 @@ class GoalSequence(Node):
         deadline = time.monotonic() + timeout
         next_publish = 0.0
         while True:
-            if self.obstacle_stopped:
-                raise RuntimeError(
-                    f"Movement '{waypoint.name}' cancelled by front obstacle. "
-                    'The remaining sequence was cancelled.'
-                )
             now = time.monotonic()
             if now >= deadline:
                 raise RuntimeError(f"Movement '{waypoint.name}' timed out.")
@@ -113,10 +123,16 @@ class GoalSequence(Node):
             ):
                 continue
 
-            position = odometry.pose.pose.position
+            if self.robot == 'husky':
+                if self.gps_position is None:
+                    continue
+                position_x, position_y = self.gps_position
+            else:
+                position = odometry.pose.pose.position
+                position_x, position_y = position.x, position.y
             distance = math.hypot(
-                position.x - waypoint.x,
-                position.y - waypoint.y,
+                position_x - waypoint.x,
+                position_y - waypoint.y,
             )
             if self.robot == 'parrot':
                 distance = math.sqrt(

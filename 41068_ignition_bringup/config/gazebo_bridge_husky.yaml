@@ -12,6 +12,13 @@
   gz_type_name: 'ignition.msgs.Odometry'
   direction: GZ_TO_ROS
 
+# GPS/NavSat absolute position
+- ros_topic_name: 'gps/fix'
+  gz_topic_name: '/model/husky/navsat'
+  ros_type_name: 'sensor_msgs/msg/NavSatFix'
+  gz_type_name: 'ignition.msgs.NavSat'
+  direction: GZ_TO_ROS
+
 # Intertial Measurement Unit
 - ros_topic_name: 'imu'
   gz_topic_name: '/model/husky/imu'

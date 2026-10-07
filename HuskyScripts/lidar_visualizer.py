@@ -11,12 +11,15 @@ from geometry_msgs.msg import PointStamped
 from nav_msgs.msg import Odometry
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
-from sensor_msgs.msg import LaserScan
+from sensor_msgs.msg import LaserScan, NavSatFix
 
 try:
     from grid_path_planner import plan_path
 except ImportError:
     from HuskyScripts.grid_path_planner import plan_path
+
+
+EARTH_RADIUS_METERS = 6378137.0
 
 
 class LidarVisualizer(Node):
@@ -31,6 +34,9 @@ class LidarVisualizer(Node):
         self._robot_y = 0.0
         self._robot_yaw = 0.0
         self._odom_received = False
+        self._gps_x = 0.0
+        self._gps_y = 0.0
+        self._gps_received = False
         self._range_min = 0.2
         self._range_max = 40.0
         self._scan_received = False
@@ -44,6 +50,12 @@ class LidarVisualizer(Node):
             Odometry,
             odom_topic,
             self._on_odom,
+            qos_profile_sensor_data,
+        )
+        self.create_subscription(
+            NavSatFix,
+            '/husky1/gps/fix',
+            self._on_gps,
             qos_profile_sensor_data,
         )
         self.create_subscription(
@@ -72,6 +84,16 @@ class LidarVisualizer(Node):
         with self._lock:
             self._goal = goal
 
+    def _on_gps(self, message: NavSatFix) -> None:
+        if not np.isfinite(message.latitude) or not np.isfinite(message.longitude):
+            return
+        latitude = np.deg2rad(message.latitude)
+        longitude = np.deg2rad(message.longitude)
+        with self._lock:
+            self._gps_x = float(longitude * EARTH_RADIUS_METERS)
+            self._gps_y = float(latitude * EARTH_RADIUS_METERS)
+            self._gps_received = True
+
     def _on_scan(self, message: LaserScan) -> None:
         angles = message.angle_min + np.arange(
             len(message.ranges), dtype=np.float32
@@ -97,6 +119,9 @@ class LidarVisualizer(Node):
                 self._robot_y,
                 self._robot_yaw,
                 self._odom_received,
+                self._gps_x,
+                self._gps_y,
+                self._gps_received,
             )
 
 
@@ -118,7 +143,10 @@ def update_plot(
     (
         angles, ranges, range_min, range_max, received, goal,
         robot_x, robot_y, robot_yaw, odom_received,
+        gps_x, gps_y, gps_received,
     ) = node.snapshot()
+    robot_x = gps_x
+    robot_y = gps_y
     if not received:
         status.set_text('Waiting for /husky1/scan...')
         return
@@ -143,7 +171,7 @@ def update_plot(
     else:
         status.set_color('black')
 
-    if odom_received and np.any(valid):
+    if gps_received and odom_received and np.any(valid):
         local_x = ranges[valid] * np.cos(angles[valid])
         local_y = ranges[valid] * np.sin(angles[valid])
         cos_yaw = np.cos(robot_yaw)
@@ -177,8 +205,8 @@ def update_plot(
     )
     map_axis.relim()
     map_axis.autoscale_view()
-    if not odom_received:
-        status.set_text(status.get_text() + ' | waiting for odometry')
+    if not odom_received or not gps_received:
+        status.set_text(status.get_text() + ' | waiting for odometry/GPS')
 
 
 def main() -> None:

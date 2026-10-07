@@ -367,7 +367,7 @@ def generate_launch_description():
         xacro_parts=['urdf_husky', 'husky.urdf.xacro'],
         bridge_config='gazebo_bridge_husky1.yaml',
         localization_config='robot_localization_husky1.yaml',
-        x='0.0',
+        x='-5.0',
         y='0.0',
         # Use a higher spawn point for the raised terrain.
         z=PythonExpression([
