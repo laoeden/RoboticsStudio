@@ -79,6 +79,9 @@ class HuskyMotion(Node):
             'planning_range': 5.0,
             'path_resolution': 0.2,
             'robot_clearance': 1.0,
+            # Lidar hits this close to the charging pad are ignored: the pad and its
+            # marker are part of the dock, not obstacles to avoid.
+            'dock_clear_radius': 1.6,
         }
         for name, value in defaults.items():
             self.declare_parameter(name, value)
@@ -133,8 +136,9 @@ class HuskyMotion(Node):
         self.last_command_linear = 0.0
         self.obstacle_detected = False
         self.estop_active = False
-        self.returning_to_base = False
-        self.battery_low = False
+        self.return_wanted = False        # drive to the charging pad until docked
+        self.last_return_attempt = 0.0
+        self.low_return_started = False
         self.scan_obstacle_points = np.empty((0, 2), dtype=np.float32)
         self.scan_received = False
         self.path = np.empty((0, 2), dtype=np.float32)
@@ -186,9 +190,27 @@ class HuskyMotion(Node):
         angles = message.angle_min + np.arange(
             len(message.ranges), dtype=np.float32
         ) * message.angle_increment
-        valid = np.isfinite(ranges)
+        finite = np.isfinite(ranges)
+        valid = finite.copy()
         valid &= ranges >= message.range_min
         valid &= ranges <= min(message.range_max, self.planning_range)
+
+        # Rays that hit within dock_clear_radius of the charging pad are ignored.
+        in_dock = np.zeros(len(ranges), dtype=bool)
+        if self.odom is not None and np.any(finite):
+            dock_position = self.odom.pose.pose.position
+            hit_x = dock_position.x + ranges[finite] * np.cos(
+                angles[finite] + self.odom_heading
+            )
+            hit_y = dock_position.y + ranges[finite] * np.sin(
+                angles[finite] + self.odom_heading
+            )
+            in_dock[finite] = (
+                np.hypot(hit_x - self.dock_x, hit_y - self.dock_y)
+                <= self.dock_clear_radius
+            )
+        valid &= ~in_dock
+
         if self.odom is not None and np.any(valid):
             pose = self.odom.pose.pose
             position = pose.position
@@ -202,11 +224,17 @@ class HuskyMotion(Node):
                 position.y + sin_yaw * local_x + cos_yaw * local_y,
             )).astype(np.float32)
             self.scan_received = True
+        elif self.odom is not None and np.any(finite):
+            # Everything the lidar sees is part of the dock: no obstacles at all.
+            self.scan_obstacle_points = np.empty((0, 2), dtype=np.float32)
+            self.scan_received = True
 
         if self.goal is None:
             return
         front_ranges = []
         for index, distance in enumerate(message.ranges):
+            if in_dock[index]:
+                continue
             angle = (
                 message.angle_min + index * message.angle_increment + math.pi
             ) % (2.0 * math.pi) - math.pi
@@ -380,36 +408,43 @@ class HuskyMotion(Node):
             self.return_to_base('operator command')
 
         elif message.data == 'STOP':
-            self.returning_to_base = False
+            self.return_wanted = False
             self.goal = None
             self.stop()
 
     def on_battery_low(self, message: Bool) -> None:
-        if message.data and not self.battery_low:
-            self.battery_low = True
+        if not message.data:
+            self.low_return_started = False  # recharged: re-arm for next time
+        elif not self.low_return_started and self.odom is not None:
+            # Latch only once odometry exists, so an early message is retried.
+            self.low_return_started = True
             self.return_to_base('low battery')
-        elif not message.data:
-            self.battery_low = False
 
     def return_to_base(self, reason: str) -> None:
         if self.odom is None:
             self.get_logger().error('Cannot return to base: no odometry yet.')
             return
-        self.returning_to_base = True
+        self.return_wanted = True
+        self.get_logger().warn(f'Returning to charging station ({reason}).')
+        self.send_return_goal()
+
+    def send_return_goal(self) -> None:
+        """Aim at the pad. tick() repeats this if the drive is cancelled or blocked."""
+        self.last_return_attempt = time.monotonic()
+        if self.odom is None:
+            return
         goal = PointStamped()
         goal.header.frame_id = self.odom.header.frame_id
         goal.point.x = self.dock_x
         goal.point.y = self.dock_y
-        self.get_logger().warn(f'Returning to charging station ({reason}).')
         self.goal = None  # a return overrides any goal in progress
         self.on_goal(goal, from_return=True)
-
 
     def on_goal(self, message: PointStamped, from_return: bool = False) -> None:
         if self.estop_active:
             self.get_logger().warn('Rejected goal: emergency stop is active.')
             return
-        if self.returning_to_base and not from_return:
+        if self.return_wanted and not from_return:
             self.get_logger().warn('Rejected goal: returning to charging station.')
             return
 
@@ -465,6 +500,21 @@ class HuskyMotion(Node):
             self.stop()
             return
 
+        if self.return_wanted and self.goal is None and self.odom is not None:
+            to_dock = math.hypot(
+                self.dock_x - self.odom.pose.pose.position.x,
+                self.dock_y - self.odom.pose.pose.position.y,
+            )
+            if to_dock <= self.position_tolerance:
+                self.get_logger().info('Docked at charging station.')
+                self.return_wanted = False
+            elif time.monotonic() - self.last_return_attempt >= 3.0:
+                self.get_logger().warn(
+                    f'Return to base not finished ({to_dock:.1f} m away); retrying.',
+                    throttle_duration_sec=10.0,
+                )
+                self.send_return_goal()
+
         if self.goal is None:
             self.stop()
             return
@@ -486,9 +536,9 @@ class HuskyMotion(Node):
         distance = float(np.linalg.norm(goal - world_position))
         if distance <= self.position_tolerance:
             self.get_logger().info(f'Arrived: {distance:.3f} m from target.')
-            if self.returning_to_base:
+            if self.return_wanted:
                 self.get_logger().info('Docked at charging station.')
-                self.returning_to_base = False
+                self.return_wanted = False
             self.goal = None
             self.stop()
             return
