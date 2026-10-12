@@ -16,6 +16,7 @@ import tkinter as tk
 from tkinter import ttk
 from datetime import datetime
 import math
+import queue
 import threading
 
 import rclpy
@@ -74,6 +75,19 @@ drone_odom_sample = None
 last_pinpoint_stamp = None
 grass_pinpoints = GrassPinpoints(REPO_ROOT / "UI" / "dry_grass_pinpoints.json")
 pinpoint_items = {}
+camera_risk_lock = threading.Lock()
+camera_risk_wakeup = threading.Event()
+camera_risk_stop = threading.Event()
+camera_risk_job = None
+camera_risk_result = None
+camera_risk_config = None
+camera_risk_husky_position = None
+camera_risk_pending_goals = []
+camera_risk_active_goal = None
+camera_risk_goal_published = 0
+camera_risk_goal_tolerance = 0.2
+camera_risk_duplicate_radius = 1.0
+camera_risk_logs = queue.Queue()
 
 
 def message_time(msg):
@@ -99,7 +113,7 @@ spiral_index = 0
 estop_active = False
 
 def odometry_callback(msg):
-    global ugv_x, ugv_y, ugv_heading
+    global ugv_x, ugv_y, ugv_heading, camera_risk_husky_position
 
     ugv_x = msg.pose.pose.position.x
     ugv_y = msg.pose.pose.position.y
@@ -110,6 +124,9 @@ def odometry_callback(msg):
         2.0 * (q.w * q.z + q.x * q.y),
         1.0 - 2.0 * (q.y * q.y + q.z * q.z)
     )
+    with camera_risk_lock:
+        camera_risk_husky_position = (ugv_x, ugv_y)
+    camera_risk_wakeup.set()
     
 odom_sub = ros_node.create_subscription(
     Odometry,
@@ -1392,9 +1409,12 @@ tk.Label(
 
 
 def clear_grass_pinpoints():
-    global last_pinpoint_stamp
+    global last_pinpoint_stamp, camera_risk_active_goal
     try:
-        grass_pinpoints.clear()
+        with camera_risk_lock:
+            grass_pinpoints.clear()
+            camera_risk_pending_goals.clear()
+            camera_risk_active_goal = None
     except OSError as error:
         pinpoint_status.config(text=f"Could not clear saved pins: {error}")
         add_log("GRASS", f"Could not clear saved pins: {error}")
@@ -1846,7 +1866,9 @@ def draw_grass_pinpoints():
     if drone_odom_sample is None:
         return
     frame = drone_odom_sample[0].header.frame_id
-    for pin in grass_pinpoints.pins:
+    with camera_risk_lock:
+        pins = list(grass_pinpoints.pins)
+    for pin in pins:
         if pin["frame_id"] != frame:
             continue
         if pin["id"] not in pinpoint_items:
@@ -1862,98 +1884,192 @@ def draw_grass_pinpoints():
         canvas.coords(label, x, y + 24)
 
 
-def update_grass_pinpoints():
-    global last_pinpoint_stamp
-    if grass_pinpoints.load_error:
-        pinpoint_status.config(text=f"Pin file needs repair: {grass_pinpoints.load_error}")
+def camera_risk_worker():
+    global camera_risk_job, camera_risk_result
+    global camera_risk_config, camera_risk_active_goal
+    global camera_risk_goal_published
+    last_stamp = None
+    while not camera_risk_stop.is_set():
+        camera_risk_wakeup.wait(0.2)
+        camera_risk_wakeup.clear()
+        if camera_risk_stop.is_set():
+            break
+        with camera_risk_lock:
+            job = camera_risk_job
+            config = camera_risk_config
+            husky_position = camera_risk_husky_position
+            camera_risk_job = None
+            if (
+                camera_risk_active_goal is not None
+                and husky_position is not None
+                and math.hypot(
+                    husky_position[0] - camera_risk_active_goal[0],
+                    husky_position[1] - camera_risk_active_goal[1],
+                ) <= camera_risk_goal_tolerance
+            ):
+                camera_risk_logs.put(("GOAL", "Camera-risk goal reached"))
+                camera_risk_active_goal = None
+            if camera_risk_active_goal is None and camera_risk_pending_goals:
+                camera_risk_active_goal = camera_risk_pending_goals.pop(0)
+                publish_husky_goal(
+                    float(camera_risk_active_goal[0]),
+                    float(camera_risk_active_goal[1]),
+                )
+                camera_risk_goal_published += 1
+                camera_risk_logs.put((
+                    "GOAL",
+                    f"Camera-risk Husky goal sent: "
+                    f"({camera_risk_active_goal[0]:.2f}, "
+                    f"{camera_risk_active_goal[1]:.2f})",
+                ))
+        if job is None or config is None:
+            continue
+
+        image, depth, odometry, stamp = job
+        if stamp == last_stamp:
+            continue
+        last_stamp = stamp
+        try:
+            (
+                hue, saturation, value, hue_tolerance,
+                saturation_tolerance, value_tolerance,
+                texture_variance, texture_fraction, auto_pin,
+            ) = config
+            processed = process_frame(
+                image, depth, hue, saturation, value,
+                hue_tolerance, saturation_tolerance, value_tolerance,
+                texture_variance, texture_fraction,
+            )
+            points = []
+            if depth is not None and odometry is not None:
+                mask = build_mask_from_values(
+                    image, hue, saturation, value,
+                    hue_tolerance, saturation_tolerance, value_tolerance,
+                )
+                texture = build_texture_mask_from_value(image, texture_variance)
+                height, width = image.shape[:2]
+                objects = find_objects(
+                    mask, depth, texture, texture_fraction / 100.0,
+                    fx=FX * width / 720, fy=FY * height / 480,
+                    cx=CX * width / 720, cy=CY * height / 480,
+                )
+                pose = odometry.pose.pose
+                rotation = np.array([
+                    pose.orientation.x, pose.orientation.y,
+                    pose.orientation.z, pose.orientation.w,
+                ])
+                position = np.array([
+                    pose.position.x, pose.position.y, pose.position.z
+                ])
+                points = [
+                    rotate_by_quaternion(camera_to_base(point), rotation) + position
+                    for _, _, _, point in objects if point is not None
+                ]
+
+            with camera_risk_lock:
+                if auto_pin and odometry is not None:
+                    added = grass_pinpoints.observe(
+                        points, odometry.header.frame_id, stamp
+                    )
+                else:
+                    added = []
+                known = [
+                    point[:2] for point in camera_risk_pending_goals
+                ]
+                if camera_risk_active_goal is not None:
+                    known.append(camera_risk_active_goal[:2])
+                for point in points:
+                    if any(
+                        np.linalg.norm(point[:2] - old_point)
+                        < camera_risk_duplicate_radius
+                        for old_point in known
+                    ):
+                        continue
+                    camera_risk_pending_goals.append(point.copy())
+                    known.append(point[:2].copy())
+            for pin in added:
+                camera_risk_logs.put((
+                    "GRASS",
+                    f"Pinned #{pin['id']} at "
+                    f"({pin['x']:.2f}, {pin['y']:.2f})",
+                ))
+            with camera_risk_lock:
+                pin_count = len(grass_pinpoints.pins)
+            with camera_risk_lock:
+                camera_risk_result = (processed, pin_count, None)
+        except Exception as error:
+            with camera_risk_lock:
+                camera_risk_result = (None, None, str(error))
+
+
+def submit_camera_risk_job():
+    global camera_risk_job, camera_risk_config
+    if rgb_sample is None:
         return
-    if not auto_pinpoints.get():
-        pinpoint_status.config(text=f"Pinning paused | Saved: {len(grass_pinpoints.pins)}")
-        return
-    rgb, depth, odometry = rgb_sample, depth_sample, drone_odom_sample
-    if rgb is None or depth is None or odometry is None:
-        pinpoint_status.config(text="Pinning: waiting for RGB, depth and drone position")
-        return
-    stamps = [rgb[1], depth[1], odometry[1]]
-    if max(stamps) - min(stamps) > 0.25:
-        pinpoint_status.config(text="Pinning: waiting for matching camera and position data")
-        return
-    if rgb[1] == last_pinpoint_stamp:
-        return
-    last_pinpoint_stamp = rgb[1]
-    image, depth_image, odom = rgb[0], depth[0], odometry[0]
-    mask = build_mask_from_values(
-        image, risk_hue.get(), risk_saturation.get(), risk_value.get(),
-        risk_hue_tolerance.get(), risk_saturation_tolerance.get(), risk_value_tolerance.get(),
+    rgb = rgb_sample
+    depth = depth_sample
+    odometry = drone_odom_sample
+    if depth is not None and odometry is not None:
+        stamps = [rgb[1], depth[1], odometry[1]]
+        if max(stamps) - min(stamps) > 0.5:
+            depth = None
+            odometry = None
+    config = (
+        risk_hue.get(), risk_saturation.get(), risk_value.get(),
+        risk_hue_tolerance.get(), risk_saturation_tolerance.get(),
+        risk_value_tolerance.get(), risk_texture_variance.get(),
+        risk_texture_fraction.get(), auto_pinpoints.get(),
     )
-    texture = build_texture_mask_from_value(image, risk_texture_variance.get())
-    height, width = image.shape[:2]
-    objects = find_objects(
-        mask, depth_image, texture, risk_texture_fraction.get() / 100.0,
-        fx=FX * width / 720, fy=FY * height / 480,
-        cx=CX * width / 720, cy=CY * height / 480,
-    )
-    pose = odom.pose.pose
-    q = pose.orientation
-    rotation = np.array([q.x, q.y, q.z, q.w])
-    position = np.array([pose.position.x, pose.position.y, pose.position.z])
-    points = [rotate_by_quaternion(camera_to_base(point), rotation) + position
-              for _, _, _, point in objects if point is not None]
-    added = grass_pinpoints.observe(points, odom.header.frame_id, rgb[1])
-    for pin in added:
-        add_log("GRASS", f"Pinned #{pin['id']} at ({pin['x']:.2f}, {pin['y']:.2f})")
-    pinpoint_status.config(text=f"Auto pinning | Saved grass pins: {len(grass_pinpoints.pins)}")
+    with camera_risk_lock:
+        camera_risk_job = (
+            rgb[0].copy(),
+            None if depth is None else depth[0].copy(),
+            None if odometry is None else odometry[0],
+            rgb[1],
+        )
+        camera_risk_config = config
+    camera_risk_wakeup.set()
 
 
 def update_camera_risk_ui():
-    try:
-        update_grass_pinpoints()
-    except Exception as error:
-        pinpoint_status.config(text=f"Pinning error: {error}")
-    if latest_rgb is not None:
-        try:
-            processed = process_frame(
-                latest_rgb,
-                latest_depth,
-                risk_hue.get(),
-                risk_saturation.get(),
-                risk_value.get(),
-                risk_hue_tolerance.get(),
-                risk_saturation_tolerance.get(),
-                risk_value_tolerance.get(),
-                risk_texture_variance.get(),
-                risk_texture_fraction.get(),
-            )
-
-            processed = cv2.cvtColor(
-                processed,
-                cv2.COLOR_BGR2RGB
-            )
-
+    global camera_risk_result
+    submit_camera_risk_job()
+    with camera_risk_lock:
+        result = camera_risk_result
+        camera_risk_result = None
+        pin_count = len(grass_pinpoints.pins)
+    while not camera_risk_logs.empty():
+        source, message = camera_risk_logs.get_nowait()
+        add_log(source, message)
+    if result is not None:
+        processed, pin_count, error = result
+        if error:
+            pinpoint_status.config(text=f"Camera-risk error: {error}")
+        elif processed is not None:
+            processed = cv2.cvtColor(processed, cv2.COLOR_BGR2RGB)
             risk_image = PILImage.fromarray(processed)
-
-            risk_image.thumbnail(
-                (1100, 650),
-                PILImage.LANCZOS
-            )
-
-            risk_photo = ImageTk.PhotoImage(
-                image=risk_image
-            )
-
-            camera_risk_display.config(
-                image=risk_photo,
-                text=""
-            )
-
+            risk_image.thumbnail((1100, 650), PILImage.LANCZOS)
+            risk_photo = ImageTk.PhotoImage(image=risk_image)
+            camera_risk_display.config(image=risk_photo, text="")
             camera_risk_display.image = risk_photo
-
-        except Exception as error:
-            camera_risk_display.config(
-                text=f"CAMERA RISK DISPLAY ERROR\n{error}"
-            )
-
+    elif rgb_sample is None:
+        camera_risk_display.config(
+            image="",
+            text="CAMERA RISK FEED WAITING FOR RGB",
+        )
+    if not auto_pinpoints.get():
+        pinpoint_status.config(text=f"Pinning paused | Saved: {pin_count}")
+    else:
+        pinpoint_status.config(text=f"Auto pinning | Saved grass pins: {pin_count}")
     root.after(100, update_camera_risk_ui)
+
+
+camera_risk_thread = threading.Thread(
+    target=camera_risk_worker,
+    daemon=True,
+    name="CAMERA_RISK_THREAD",
+)
+camera_risk_thread.start()
 
 
 update_telemetry_ui()
