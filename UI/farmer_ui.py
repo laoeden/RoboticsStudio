@@ -1037,12 +1037,12 @@ canvas.create_text(
 log_panel = tk.Frame(
     center,
     bg=PANEL,
-    height=170,
+    height=150,
     highlightbackground=BORDER,
     highlightthickness=1
 )
 log_panel.grid(row=1, column=0, sticky="ew", pady=(8, 0))
-log_panel.grid_propagate(False)
+log_panel.pack_propagate(False)
 
 tk.Label(
     log_panel,
