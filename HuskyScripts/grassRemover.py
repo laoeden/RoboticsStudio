@@ -104,16 +104,6 @@ class GrassRemover(Node):
             )
             return
         x, y = self.position
-        if self.patches:
-            nearest = min(self.patches, key=lambda name: math.hypot(
-                x - self.patches[name][0], y - self.patches[name][1]))
-            gx, gy = self.patches[nearest]
-            self.get_logger().info(
-                f'Husky XY ({x:.2f}, {y:.2f}); nearest grass {nearest}: '
-                f'{math.hypot(x - gx, y - gy):.2f} m '
-                f'(removal radius {self.radius:.2f} m)',
-                throttle_duration_sec=5.0,
-            )
         for name, (gx, gy) in list(self.patches.items()):
             if math.hypot(x - gx, y - gy) > self.radius:
                 continue
