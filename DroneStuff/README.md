@@ -71,6 +71,11 @@ python3 HuskyScripts/HuskyMotion.py
 python3 DroneStuff/camera_risk.py
 ```
 
+The FARMER control station also runs the same camera-risk detection in a
+worker thread. Its CAMERA RISK tab publishes detected locations to
+`/husky1/goal`, queues duplicate-filtered goals, and waits for Husky odometry
+to reach each goal before sending the next one.
+
 Each location is queued and published once per camera process. The next goal
 is not published until the Husky reaches the current goal within `0.2` metres,
 so detections do not overwrite one another. A later contour within `1.0`
