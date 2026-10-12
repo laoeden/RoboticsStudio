@@ -652,11 +652,84 @@ pinpoint_status.pack(anchor="w", padx=15, pady=5)
 # MAIN AREA
 # =========================================================
 
-main = tk.Frame(main_tab, bg=BG)
-main.pack(fill="both", expand=True)
+# Scrollable MAIN tab
+main_canvas = tk.Canvas(
+    main_tab,
+    bg=BG,
+    highlightthickness=0
+)
+
+main_scrollbar = tk.Scrollbar(
+    main_tab,
+    orient="vertical",
+    command=main_canvas.yview
+)
+
+main = tk.Frame(
+    main_canvas,
+    bg=BG
+)
+
+main_window = main_canvas.create_window(
+    (0, 0),
+    window=main,
+    anchor="nw"
+)
+
+main_canvas.configure(
+    yscrollcommand=main_scrollbar.set
+)
+
+main_canvas.pack(
+    side="left",
+    fill="both",
+    expand=True
+)
+
+main_scrollbar.pack(
+    side="right",
+    fill="y"
+)
+
+def update_main_scroll_region(event=None):
+    main_canvas.configure(
+        scrollregion=main_canvas.bbox("all")
+    )
+
+def resize_main_width(event):
+    main_canvas.itemconfigure(
+        main_window,
+        width=event.width
+    )
+
+main.bind(
+    "<Configure>",
+    update_main_scroll_region
+)
+
+main_canvas.bind(
+    "<Configure>",
+    resize_main_width
+)
 
 main.grid_columnconfigure(1, weight=1)
 main.grid_rowconfigure(0, weight=1)
+
+def scroll_main(event):
+    main_canvas.yview_scroll(
+        int(-1 * (event.delta / 120)),
+        "units"
+    )
+
+def scroll_main_up(event):
+    main_canvas.yview_scroll(-1, "units")
+
+def scroll_main_down(event):
+    main_canvas.yview_scroll(1, "units")
+
+main_canvas.bind_all("<MouseWheel>", scroll_main)
+main_canvas.bind_all("<Button-4>", scroll_main_up)
+main_canvas.bind_all("<Button-5>", scroll_main_down)
 
 
 # =========================================================
@@ -671,7 +744,6 @@ left = tk.Frame(
     highlightthickness=1
 )
 left.grid(row=0, column=0, sticky="ns", padx=(0, 5))
-left.grid_propagate(False)
 
 tk.Label(
     left,
@@ -1076,7 +1148,6 @@ right = tk.Frame(
     highlightthickness=1
 )
 right.grid(row=0, column=2, sticky="ns", padx=(5, 0))
-right.grid_propagate(False)
 
 tk.Label(
     right,
