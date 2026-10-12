@@ -64,6 +64,7 @@ rclpy.init()
 ros_node = Node("farmer_control_station")
 bridge = CvBridge()
 latest_rgb = None
+latest_rgb_time = None
 rgb_frame_count = 0
 latest_depth = None
 rgb_sample = None
@@ -87,6 +88,7 @@ latest_lidar_scan = None
 uav_x = None
 uav_y = None
 uav_z = None
+uav_odom_history = []
 previous_uav_x = None
 previous_uav_y = None
 spiral_active = False
@@ -146,12 +148,24 @@ lidar_sub = ros_node.create_subscription(
 )
 
 def drone_odometry_callback(msg):
-    global uav_x, uav_y, uav_z, drone_odom_sample
+    global uav_x, uav_y, uav_z, drone_odom_sample, uav_odom_history
 
     uav_x = msg.pose.pose.position.x
     uav_y = msg.pose.pose.position.y
     uav_z = msg.pose.pose.position.z
     drone_odom_sample = (msg, message_time(msg))
+
+    odom_time = (
+        msg.header.stamp.sec
+        + msg.header.stamp.nanosec * 1e-9
+    )
+
+    uav_odom_history.append(
+        (odom_time, uav_x, uav_y, uav_z)
+    )
+
+    if len(uav_odom_history) > 200:
+        uav_odom_history.pop(0)
 
 
 drone_odom_sub = ros_node.create_subscription(
@@ -161,12 +175,17 @@ drone_odom_sub = ros_node.create_subscription(
     10
 )
 
-
 def rgb_callback(msg):
-    global latest_rgb, rgb_frame_count, rgb_sample
+    global latest_rgb, latest_rgb_time, rgb_frame_count, rgb_sample
 
     try:
         latest_rgb = bridge.imgmsg_to_cv2(msg, desired_encoding="bgr8")
+
+        latest_rgb_time = (
+            msg.header.stamp.sec
+            + msg.header.stamp.nanosec * 1e-9
+        )
+
         rgb_frame_count += 1
         rgb_sample = (latest_rgb, message_time(msg))
     except Exception as error:
@@ -1254,22 +1273,36 @@ def advance_spiral():
     spiral_index += 1
     publish_drone_goal(*spiral_targets[spiral_index])
 
+def get_synced_uav_position():
+    if latest_rgb_time is None or not uav_odom_history:
+        return uav_x, uav_y, uav_z
+
+    closest = min(
+        uav_odom_history,
+        key=lambda sample: abs(sample[0] - latest_rgb_time)
+    )
+
+    _, synced_x, synced_y, synced_z = closest
+    return synced_x, synced_y, synced_z
+
 
 def update_telemetry_ui():
     global previous_uav_x, previous_uav_y
 
     advance_spiral()
 
-    if uav_x is not None and uav_y is not None:
+    display_uav_x, display_uav_y, display_uav_z = get_synced_uav_position()
+
+    if display_uav_x is not None and display_uav_y is not None:
         if previous_uav_x is not None and previous_uav_y is not None:
             # Move the map features in the opposite direction of the UAV's movement to keep the UAV centered
             canvas.move(
                 "map_feature",
-                (previous_uav_x - uav_x) * MAP_SCALE,
-                (uav_y - previous_uav_y) * MAP_SCALE,
+                (previous_uav_x - display_uav_x) * MAP_SCALE,
+                (display_uav_y - previous_uav_y) * MAP_SCALE,
             )
-        previous_uav_x = uav_x
-        previous_uav_y = uav_y
+    previous_uav_x = display_uav_x
+    previous_uav_y = display_uav_y
 
     if battery_level is not None:
         suffix = " CHG" if charging_flag else (" LOW" if battery_low_flag else "")
@@ -1295,7 +1328,12 @@ def update_telemetry_ui():
 
     # Move UGV marker
     if ugv_x is not None and ugv_y is not None:
-        map_x, map_y = world_to_map(ugv_x, ugv_y, uav_x or 0.0, uav_y or 0.0)
+        map_x, map_y = world_to_map(
+            ugv_x,
+            ugv_y,
+            display_uav_x or 0.0,
+            display_uav_y or 0.0
+        )
 
         canvas.coords(
             ugv_marker,
@@ -1309,9 +1347,13 @@ def update_telemetry_ui():
         )
 
     # Move UAV marker
-    if uav_x is not None and uav_y is not None:
-        # Use the UAV's current position as the center of the map
-        map_x, map_y = world_to_map(uav_x, uav_y, uav_x, uav_y)
+    if display_uav_x is not None and display_uav_y is not None:
+        map_x, map_y = world_to_map(
+            display_uav_x,
+            display_uav_y,
+            display_uav_x,
+            display_uav_y
+        )
 
         canvas.coords(
             uav_marker,
