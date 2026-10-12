@@ -9,7 +9,8 @@ from DroneStuff.camera_risk import (
     process_frame, build_mask_from_values, build_texture_mask_from_value,
     find_objects, camera_to_base, rotate_by_quaternion, FX, FY, CX, CY,
 )
-from UI.grass_pinpoints import GrassPinpoints
+from UI.grass_pinpoints import GrassPinpoints, match_pin_samples
+from collections import deque
 
 import tkinter as tk
 from tkinter import ttk
@@ -70,6 +71,9 @@ latest_depth = None
 rgb_sample = None
 depth_sample = None
 drone_odom_sample = None
+rgb_pin_samples = deque(maxlen=20)
+depth_pin_samples = deque(maxlen=20)
+odom_pin_samples = deque(maxlen=100)
 last_pinpoint_stamp = None
 grass_pinpoints = GrassPinpoints(REPO_ROOT / "UI" / "dry_grass_pinpoints.json")
 pinpoint_items = {}
@@ -154,6 +158,7 @@ def drone_odometry_callback(msg):
     uav_y = msg.pose.pose.position.y
     uav_z = msg.pose.pose.position.z
     drone_odom_sample = (msg, message_time(msg))
+    odom_pin_samples.append(drone_odom_sample)
 
     odom_time = (
         msg.header.stamp.sec
@@ -188,6 +193,7 @@ def rgb_callback(msg):
 
         rgb_frame_count += 1
         rgb_sample = (latest_rgb, message_time(msg))
+        rgb_pin_samples.append(rgb_sample)
     except Exception as error:
         ros_node.get_logger().error(f"RGB image conversion failed: {error}")
 
@@ -228,6 +234,7 @@ def depth_callback(msg):
 
         latest_depth = depth
         depth_sample = (depth, message_time(msg))
+        depth_pin_samples.append(depth_sample)
 
     except Exception as error:
         ros_node.get_logger().error(
@@ -1557,9 +1564,17 @@ def update_grass_pinpoints():
     if rgb is None or depth is None or odometry is None:
         pinpoint_status.config(text="Pinning: waiting for RGB, depth and drone position")
         return
-    stamps = [rgb[1], depth[1], odometry[1]]
-    if max(stamps) - min(stamps) > 0.25:
-        pinpoint_status.config(text="Pinning: waiting for matching camera and position data")
+    matched = match_pin_samples(tuple(rgb_pin_samples), tuple(depth_pin_samples),
+                                tuple(odom_pin_samples))
+    if matched is None:
+        pinpoint_status.config(text=(
+            'Pinning: waiting for matching data | '
+            f'RGB {rgb[1]:.2f}, depth {depth[1]:.2f}, pose {odometry[1]:.2f} s'))
+        return
+    rgb, depth, odometry = matched
+    # Do not reuse an old matched set when one stream stops or falls behind.
+    if max(rgb_sample[1], depth_sample[1], drone_odom_sample[1]) - rgb[1] > 0.5:
+        pinpoint_status.config(text='Pinning: matching data is stale; waiting for camera and pose')
         return
     if rgb[1] == last_pinpoint_stamp:
         return

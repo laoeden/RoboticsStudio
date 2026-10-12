@@ -29,6 +29,11 @@ python3 HuskyScripts/HuskyMotion.py &
 
 HUSKY_PID=$!
 
+# Remove grass patches as the Husky approaches them.
+python3 HuskyScripts/grassRemover.py &
+
+GRASS_PID=$!
+
 # Battery simulation for the Husky (charging pad at the origin)
 python3 Mission/battery_node.py &
 
@@ -48,7 +53,7 @@ UI_PID=$!
 
 cleanup() {
 	trap - INT TERM EXIT
-	kill "$UI_PID" "$BATTERY_PID" "$HUSKY_PID" "$DRONE_PID" "$SIM_PID" 2>/dev/null || true
+	kill "$UI_PID" "$BATTERY_PID" "$GRASS_PID" "$HUSKY_PID" "$DRONE_PID" "$SIM_PID" 2>/dev/null || true
 	wait 2>/dev/null || true
 }
 
@@ -58,9 +63,9 @@ echo "FARMER launched."
 echo "Gazebo PID: $SIM_PID"
 echo "Drone controller PID: $DRONE_PID"
 echo "Husky controller PID: $HUSKY_PID"
+echo "Grass remover PID: $GRASS_PID"
 echo "Battery node PID: $BATTERY_PID"
 echo "UI PID: $UI_PID"
 
 # Keep launcher alive
 wait
-

@@ -4,6 +4,19 @@ import math
 from pathlib import Path
 
 
+def match_pin_samples(rgb_samples, depth_samples, odom_samples, tolerance=0.25):
+    """Find the newest RGB sample with depth and pose within the time window."""
+    for rgb in reversed(tuple(rgb_samples)):
+        if not depth_samples or not odom_samples:
+            return None
+        depth = min(tuple(depth_samples), key=lambda sample: abs(sample[1] - rgb[1]))
+        odom = min(tuple(odom_samples), key=lambda sample: abs(sample[1] - rgb[1]))
+        stamps = (rgb[1], depth[1], odom[1])
+        if max(stamps) - min(stamps) <= tolerance:
+            return rgb, depth, odom
+    return None
+
+
 class GrassPinpoints:
     def __init__(self, path, radius=1.0, confirmations=3):
         self.path = Path(path)
