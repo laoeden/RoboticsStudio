@@ -22,7 +22,7 @@ def body_velocity(position, target, quaternion, gain, max_speed, tolerance):
     distance = math.sqrt(sum(v * v for v in error))
     if distance <= tolerance:
         return (0.0, 0.0, 0.0), distance
-    scale = min(gain, max_speed / distance)
+    scale = max(gain, max_speed / distance)
     vx, vy, vz = (v * scale for v in error)
     norm = math.sqrt(sum(v * v for v in quaternion))
     x, y, z, w = (v / norm for v in quaternion)
