@@ -19,7 +19,7 @@ import threading
 
 import rclpy
 from rclpy.node import Node
-from std_msgs.msg import String
+from std_msgs.msg import Bool, Float32, String
 from nav_msgs.msg import Odometry
 from sensor_msgs.msg import Image as RosImage
 from sensor_msgs.msg import LaserScan
@@ -113,6 +113,26 @@ odom_sub = ros_node.create_subscription(
     odometry_callback,
     10
 )
+
+battery_level = None
+battery_low_flag = False
+charging_flag = False
+
+def battery_callback(msg):
+    global battery_level
+    battery_level = msg.data
+
+def battery_low_callback(msg):
+    global battery_low_flag
+    battery_low_flag = msg.data
+
+def charging_callback(msg):
+    global charging_flag
+    charging_flag = msg.data
+
+battery_sub = ros_node.create_subscription(Float32, "/husky1/battery", battery_callback, 10)
+battery_low_sub = ros_node.create_subscription(Bool, "/husky1/battery_low", battery_low_callback, 10)
+charging_sub = ros_node.create_subscription(Bool, "/husky1/charging", charging_callback, 10)
 
 def lidar_callback(msg):
     global latest_lidar_scan
@@ -693,7 +713,7 @@ def info_row(parent, label, value):
     return value_label
 
 
-info_row(left, "BATTERY", "92%")
+battery_label = info_row(left, "BATTERY", "-- %")
 info_row(left, "PROGRESS", "0%")
 info_row(left, "HAZARDS", "0%")
 info_row(left, "LOCALISATION", "FIXED")
@@ -1250,6 +1270,13 @@ def update_telemetry_ui():
             )
         previous_uav_x = uav_x
         previous_uav_y = uav_y
+
+    if battery_level is not None:
+        suffix = " CHG" if charging_flag else (" LOW" if battery_low_flag else "")
+        battery_label.config(
+            text=f"{battery_level:.0f}%{suffix}",
+            fg=RED if battery_low_flag else (GREEN_BRIGHT if charging_flag else TEXT),
+        )
 
     if ugv_x is not None:
         ugv_x_label.config(text=f"{ugv_x:.2f} m")

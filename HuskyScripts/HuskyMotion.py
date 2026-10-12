@@ -65,6 +65,11 @@ class HuskyMotion(Node):
             if not math.isfinite(value) or value <= 0:
                 raise ValueError(f'{name} must be finite and positive')
             setattr(self, name, value)
+        # Charging pad position in the husky1_odom frame (zero is valid here).
+        self.declare_parameter('dock_x', 0.0)
+        self.declare_parameter('dock_y', 0.0)
+        self.dock_x = float(self.get_parameter('dock_x').value)
+        self.dock_y = float(self.get_parameter('dock_y').value)
 
         self.odom = None
         self.odom_received = 0.0
@@ -74,6 +79,8 @@ class HuskyMotion(Node):
         self.last_progress_time = 0.0
         self.obstacle_detected = False
         self.estop_active = False
+        self.returning_to_base = False
+        self.battery_low = False
         self.scan_obstacle_points = np.empty((0, 2), dtype=np.float32)
         self.scan_received = False
         self.path = np.empty((0, 2), dtype=np.float32)
@@ -92,6 +99,9 @@ class HuskyMotion(Node):
             qos_profile_sensor_data,
         )
         self.create_subscription(PointStamped, 'goal', self.on_goal, 10)
+        # Absolute topic: the UI publishes mission commands for every robot.
+        self.create_subscription(String, '/mission_command', self.on_mission_command, 10)
+        self.create_subscription(Bool, 'battery_low', self.on_battery_low, 10)
         self.create_subscription(
             LaserScan,
             'scan',
@@ -221,10 +231,41 @@ class HuskyMotion(Node):
             self.estop_active = False
             self.get_logger().info('Emergency stop reset.')
 
+        elif message.data == 'RETURN_TO_BASE':
+            self.return_to_base('operator command')
 
-    def on_goal(self, message: PointStamped) -> None:
+        elif message.data == 'STOP':
+            self.returning_to_base = False
+            self.goal = None
+            self.stop()
+
+    def on_battery_low(self, message: Bool) -> None:
+        if message.data and not self.battery_low:
+            self.battery_low = True
+            self.return_to_base('low battery')
+        elif not message.data:
+            self.battery_low = False
+
+    def return_to_base(self, reason: str) -> None:
+        if self.odom is None:
+            self.get_logger().error('Cannot return to base: no odometry yet.')
+            return
+        self.returning_to_base = True
+        goal = PointStamped()
+        goal.header.frame_id = self.odom.header.frame_id
+        goal.point.x = self.dock_x
+        goal.point.y = self.dock_y
+        self.get_logger().warn(f'Returning to charging station ({reason}).')
+        self.goal = None  # a return overrides any goal in progress
+        self.on_goal(goal, from_return=True)
+
+
+    def on_goal(self, message: PointStamped, from_return: bool = False) -> None:
         if self.estop_active:
             self.get_logger().warn('Rejected goal: emergency stop is active.')
+            return
+        if self.returning_to_base and not from_return:
+            self.get_logger().warn('Rejected goal: returning to charging station.')
             return
 
         if not all(math.isfinite(value) for value in (message.point.x, message.point.y)):
@@ -300,6 +341,9 @@ class HuskyMotion(Node):
         distance = float(np.linalg.norm(goal - position))
         if distance <= self.position_tolerance:
             self.get_logger().info(f'Arrived: {distance:.3f} m from target.')
+            if self.returning_to_base:
+                self.get_logger().info('Docked at charging station.')
+                self.returning_to_base = False
             self.goal = None
             self.stop()
             return

@@ -134,6 +134,30 @@
       <static>true</static>
     </include>
 
+    <!-- Charging station -->
+    <model name="charging_station">
+      <static>true</static>
+      <pose>0 0 1.0 0 0 0</pose>
+      <link name="pad_link">
+        <visual name="pad">
+          <pose>0 0 0.01 0 0 0</pose>
+          <geometry><box><size>2.0 2.0 0.02</size></box></geometry>
+          <material>
+            <ambient>0.1 0.4 0.9 1</ambient>
+            <diffuse>0.1 0.4 0.9 1</diffuse>
+          </material>
+        </visual>
+        <visual name="post">
+          <pose>-0.8 0 0.4 0 0 0</pose>
+          <geometry><box><size>0.15 0.4 0.8</size></box></geometry>
+          <material>
+            <ambient>0.9 0.8 0.1 1</ambient>
+            <diffuse>0.9 0.8 0.1 1</diffuse>
+          </material>
+        </visual>
+      </link>
+    </model>
+
     <!--dry grass-->
     <include>
        <uri>model://Dry_Grass</uri>
