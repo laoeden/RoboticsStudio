@@ -11,6 +11,7 @@ from DroneStuff.camera_risk import (
 )
 from UI.grass_pinpoints import GrassPinpoints, match_pin_samples
 from collections import deque
+from HuskyScripts.grid_path_planner import plan_path
 
 import tkinter as tk
 from tkinter import ttk
@@ -88,6 +89,7 @@ ugv_y = None
 ugv_heading = None
 
 latest_lidar_scan = None
+latest_husky_goal = None
 
 uav_x = None
 uav_y = None
@@ -148,6 +150,21 @@ lidar_sub = ros_node.create_subscription(
     LaserScan,
     "/husky1/scan",
     lidar_callback,
+    10
+)
+
+def husky_goal_callback(msg):
+    global latest_husky_goal
+    latest_husky_goal = (
+        float(msg.point.x),
+        float(msg.point.y)
+    )
+
+
+husky_goal_sub = ros_node.create_subscription(
+    PointStamped,
+    "/husky1/goal",
+    husky_goal_callback,
     10
 )
 
@@ -510,40 +527,165 @@ notebook.add(camera_risk_tab, text="CAMERA RISK")
 # HUSKY LIDAR TAB
 # =========================================================
 
-lidar_figure = Figure(figsize=(13, 6), dpi=100)
+LIDAR_MAX_RANGE = 15.0
+LIDAR_COLLISION_DISTANCE = 1.0
+LIDAR_FRONT_ANGLE = math.radians(45.0)
 
-lidar_axis = lidar_figure.add_subplot(121, projection="polar")
+lidar_figure = Figure(
+    figsize=(13, 6),
+    dpi=100
+)
+
+lidar_axis = lidar_figure.add_subplot(
+    121,
+    projection="polar"
+)
+
 lidar_map_axis = lidar_figure.add_subplot(122)
+
+# -------------------------
+# Polar lidar display
+# -------------------------
 
 lidar_axis.set_theta_zero_location("E")
 lidar_axis.set_theta_direction(1)
+
 lidar_axis.set_title(
     "Husky 360 lidar | front +/-45 deg | collision distance 1.0 m"
 )
-lidar_axis.set_rmax(15.0)
+
+lidar_axis.set_rmax(LIDAR_MAX_RANGE)
+lidar_axis.set_rlabel_position(135)
+
+sector_angles = np.linspace(
+    -LIDAR_FRONT_ANGLE,
+    LIDAR_FRONT_ANGLE,
+    100
+)
+
+lidar_axis.fill_between(
+    sector_angles,
+    0.0,
+    LIDAR_COLLISION_DISTANCE,
+    color="red",
+    alpha=0.18,
+    label="collision zone"
+)
+
+lidar_axis.plot(
+    sector_angles,
+    np.full_like(
+        sector_angles,
+        LIDAR_COLLISION_DISTANCE
+    ),
+    color="red",
+    linewidth=1.5,
+    label="1.0 m boundary"
+)
+
+lidar_axis.plot(
+    [0.0, 0.0],
+    [0.0, LIDAR_MAX_RANGE],
+    color="black",
+    linewidth=1
+)
 
 lidar_points, = lidar_axis.plot(
     [],
     [],
     ".",
-    markersize=3
+    color="steelblue",
+    markersize=3,
+    label="lidar"
 )
 
-lidar_map_axis.set_title("Current lidar obstacles and planned path")
+lidar_front_points, = lidar_axis.plot(
+    [],
+    [],
+    ".",
+    color="darkorange",
+    markersize=5,
+    label="front sector"
+)
+
+lidar_axis.legend(
+    loc="upper right",
+    bbox_to_anchor=(1.25, 1.1)
+)
+
+# -------------------------
+# World map display
+# -------------------------
+
+lidar_map_axis.set_title(
+    "Current lidar obstacles and planned path"
+)
+
 lidar_map_axis.set_xlabel("world X (m)")
 lidar_map_axis.set_ylabel("world Y (m)")
-lidar_map_axis.set_aspect("equal", adjustable="datalim")
-lidar_map_axis.grid(True, alpha=0.3)
+
+lidar_map_axis.set_aspect(
+    "equal",
+    adjustable="datalim"
+)
+
+lidar_map_axis.grid(
+    True,
+    alpha=0.3
+)
 
 lidar_map_points, = lidar_map_axis.plot(
     [],
     [],
     ".",
+    color="slateblue",
     markersize=4,
     label="current lidar"
 )
 
-lidar_map_axis.legend(loc="upper right")
+lidar_goal_points, = lidar_map_axis.plot(
+    [],
+    [],
+    "x",
+    color="crimson",
+    markersize=10,
+    label="latest goal"
+)
+
+lidar_path_points, = lidar_map_axis.plot(
+    [],
+    [],
+    "-",
+    color="seagreen",
+    linewidth=2,
+    label="planned path"
+)
+
+lidar_robot_point, = lidar_map_axis.plot(
+    [],
+    [],
+    "o",
+    color="black",
+    markersize=7,
+    label="Husky"
+)
+
+lidar_robot_heading, = lidar_map_axis.plot(
+    [],
+    [],
+    color="black",
+    linewidth=2
+)
+
+lidar_status = lidar_figure.text(
+    0.02,
+    0.02,
+    "Waiting for /husky1/scan..."
+)
+
+lidar_map_axis.legend(
+    loc="upper right"
+)
 
 lidar_canvas = FigureCanvasTkAgg(
     lidar_figure,
@@ -555,6 +697,10 @@ lidar_canvas.get_tk_widget().pack(
     expand=True,
     padx=8,
     pady=8
+)
+
+lidar_figure.tight_layout(
+    rect=[0.0, 0.04, 1.0, 1.0]
 )
 
 lidar_canvas.draw()
@@ -1477,60 +1623,231 @@ def update_telemetry_ui():
 
 def update_lidar_ui():
     if latest_lidar_scan is not None:
-        ranges = latest_lidar_scan.ranges
-
-        angles = [
-            latest_lidar_scan.angle_min
-            + i * latest_lidar_scan.angle_increment
-            for i in range(len(ranges))
-        ]
-
-        valid_angles = []
-        valid_ranges = []
-
-        for angle, distance in zip(angles, ranges):
-            if (
-                math.isfinite(distance)
-                and distance >= latest_lidar_scan.range_min
-                and distance <= min(latest_lidar_scan.range_max, 15.0)
-            ):
-                valid_angles.append(angle)
-                valid_ranges.append(distance)
-
-        lidar_points.set_data(
-            valid_angles,
-            valid_ranges
+        ranges = np.asarray(
+            latest_lidar_scan.ranges,
+            dtype=np.float32
         )
 
-        # Convert LiDAR points into world coordinates
-        if ugv_x is not None and ugv_y is not None and ugv_heading is not None:
-            world_x = []
-            world_y = []
+        angles = (
+            latest_lidar_scan.angle_min
+            + np.arange(
+                len(ranges),
+                dtype=np.float32
+            )
+            * latest_lidar_scan.angle_increment
+        )
+
+        # -------------------------
+        # Valid lidar rays
+        # -------------------------
+
+        valid = np.isfinite(ranges)
+
+        valid &= (
+            ranges >= latest_lidar_scan.range_min
+        )
+
+        valid &= (
+            ranges
+            <= min(
+                latest_lidar_scan.range_max,
+                LIDAR_MAX_RANGE
+            )
+        )
+
+        # Front +/-45 degree sector
+        wrapped_angles = (
+            angles + np.pi
+        ) % (2.0 * np.pi) - np.pi
+
+        front = (
+            valid
+            & (
+                np.abs(wrapped_angles)
+                <= LIDAR_FRONT_ANGLE
+            )
+        )
+
+        collision = (
+            front
+            & (
+                ranges
+                <= LIDAR_COLLISION_DISTANCE
+            )
+        )
+
+        lidar_points.set_data(
+            angles[valid],
+            ranges[valid]
+        )
+
+        lidar_front_points.set_data(
+            angles[front],
+            ranges[front]
+        )
+
+        # -------------------------
+        # Status
+        # -------------------------
+
+        valid_count = int(
+            np.count_nonzero(valid)
+        )
+
+        if np.any(front):
+            nearest_front = float(
+                np.min(ranges[front])
+            )
+
+            status_text = (
+                f"valid rays: {valid_count} | "
+                f"nearest front: {nearest_front:.2f} m"
+            )
+        else:
+            status_text = (
+                f"valid rays: {valid_count} | "
+                "nearest front: none"
+            )
+
+        if np.any(collision):
+            status_text += " | COLLISION ZONE"
+            lidar_status.set_color("red")
+        else:
+            lidar_status.set_color("black")
+
+        # -------------------------
+        # Convert lidar to world XY
+        # -------------------------
+
+        world_points = np.empty(
+            (0, 2),
+            dtype=np.float32
+        )
+
+        if (
+            ugv_x is not None
+            and ugv_y is not None
+            and ugv_heading is not None
+            and np.any(valid)
+        ):
+            local_x = (
+                ranges[valid]
+                * np.cos(angles[valid])
+            )
+
+            local_y = (
+                ranges[valid]
+                * np.sin(angles[valid])
+            )
 
             cos_yaw = math.cos(ugv_heading)
             sin_yaw = math.sin(ugv_heading)
 
-            for angle, distance in zip(valid_angles, valid_ranges):
-                local_x = distance * math.cos(angle)
-                local_y = distance * math.sin(angle)
+            world_x = (
+                ugv_x
+                + cos_yaw * local_x
+                - sin_yaw * local_y
+            )
 
-                x = ugv_x + cos_yaw * local_x - sin_yaw * local_y
-                y = ugv_y + sin_yaw * local_x + cos_yaw * local_y
+            world_y = (
+                ugv_y
+                + sin_yaw * local_x
+                + cos_yaw * local_y
+            )
 
-                world_x.append(x)
-                world_y.append(y)
+            world_points = np.column_stack(
+                (world_x, world_y)
+            ).astype(np.float32)
 
             lidar_map_points.set_data(
                 world_x,
                 world_y
             )
 
-            lidar_map_axis.relim()
-            lidar_map_axis.autoscale_view()
+            # -------------------------
+            # Husky position + heading
+            # -------------------------
+
+            lidar_robot_point.set_data(
+                [ugv_x],
+                [ugv_y]
+            )
+
+            lidar_robot_heading.set_data(
+                [
+                    ugv_x,
+                    ugv_x + math.cos(ugv_heading)
+                ],
+                [
+                    ugv_y,
+                    ugv_y + math.sin(ugv_heading)
+                ]
+            )
+
+        else:
+            lidar_map_points.set_data([], [])
+            lidar_robot_point.set_data([], [])
+            lidar_robot_heading.set_data([], [])
+
+        # -------------------------
+        # Goal + planned path
+        # -------------------------
+
+        if latest_husky_goal is not None:
+            goal = np.asarray(
+                latest_husky_goal,
+                dtype=np.float32
+            )
+
+            lidar_goal_points.set_data(
+                [goal[0]],
+                [goal[1]]
+            )
+
+            if (
+                ugv_x is not None
+                and ugv_y is not None
+            ):
+                path = plan_path(
+                    ugv_x,
+                    ugv_y,
+                    goal,
+                    world_points
+                )
+
+                if path.size:
+                    lidar_path_points.set_data(
+                        path[:, 0],
+                        path[:, 1]
+                    )
+
+                    status_text += " | path planned"
+
+                else:
+                    lidar_path_points.set_data(
+                        [],
+                        []
+                    )
+
+                    status_text += (
+                        " | no collision-free path"
+                    )
+
+        else:
+            lidar_goal_points.set_data([], [])
+            lidar_path_points.set_data([], [])
+
+        lidar_status.set_text(status_text)
+
+        lidar_map_axis.relim()
+        lidar_map_axis.autoscale_view()
 
         lidar_canvas.draw_idle()
 
-    root.after(100, update_lidar_ui)
+    root.after(
+        100,
+        update_lidar_ui
+    )
 
 def draw_grass_pinpoints():
     if drone_odom_sample is None:
