@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Move the simulated Husky to absolute XY coordinates in its odometry frame."""
+"""Move the simulated Husky to absolute XY coordinates in world space."""
 
 import math
 import time
@@ -49,10 +49,11 @@ class HuskyMotion(Node):
     def __init__(self) -> None:
         super().__init__('husky_motion', namespace='husky1')
         defaults = {
-            'linear_gain': 1.5,
-            'max_speed': 2.0,
-            'angular_gain': 1.5,
-            'max_angular_speed': 1.2,
+            'linear_gain': 0.8,
+            'max_speed': 1.5,
+            'angular_gain': 2.0,
+            'max_angular_speed': 1.0,
+            'min_turn_speed': 0.8,
             'heading_tolerance': 0.15,
             'position_tolerance': 0.2,
             'odom_timeout': 5.0,
@@ -61,17 +62,23 @@ class HuskyMotion(Node):
             'gps_origin_longitude': 0.0,
             'gps_origin_heading': 0.0,
             'initial_heading': 0.0,
+            'odom_to_world_heading': 0.0,
             'odom_calibration_alpha': 0.1,
             'goal_timeout': 120.0,
             'progress_timeout': 5.0,
             'minimum_progress': 0.05,
-            'obstacle_stopping_enabled': False,
+            'stuck_recovery_enabled': True,
+            'stuck_recovery_duration': 1.5,
+            'stuck_recovery_speed': 0.4,
+            'stuck_recovery_turn_speed': 1.2,
+            'max_stuck_recoveries': 2,
+            'obstacle_stopping_enabled': True,
             'progress_stopping_enabled': False,
             'obstacle_distance': 1.0,
             'front_angle': math.pi / 4.0,
             'planning_range': 5.0,
             'path_resolution': 0.2,
-            'robot_clearance': 0.45,
+            'robot_clearance': 1.0,
         }
         for name, value in defaults.items():
             self.declare_parameter(name, value)
@@ -88,7 +95,11 @@ class HuskyMotion(Node):
                 elif name == 'gps_origin_longitude':
                     if not -180.0 <= value <= 180.0:
                         raise ValueError(f'{name} must be between -180 and 180')
-                elif name in ('gps_origin_heading', 'initial_heading'):
+                elif name in (
+                    'gps_origin_heading',
+                    'initial_heading',
+                    'odom_to_world_heading',
+                ):
                     value = math.radians(value)
                 elif name == 'odom_calibration_alpha':
                     if not 0.0 < value <= 1.0:
@@ -111,6 +122,10 @@ class HuskyMotion(Node):
         self.goal_started = 0.0
         self.best_goal_distance = math.inf
         self.last_progress_time = 0.0
+        self.recovery_until = 0.0
+        self.recovery_turn_direction = 1.0
+        self.recovery_attempts = 0
+        self.last_command_linear = 0.0
         self.obstacle_detected = False
         self.estop_active = False
         self.scan_obstacle_points = np.empty((0, 2), dtype=np.float32)
@@ -138,6 +153,12 @@ class HuskyMotion(Node):
         )
         self.create_subscription(PointStamped, 'goal', self.on_goal, 10)
         self.create_subscription(
+            String,
+            'mission_command',
+            self.on_mission_command,
+            10,
+        )
+        self.create_subscription(
             LaserScan,
             'scan',
             self.on_scan,
@@ -148,7 +169,7 @@ class HuskyMotion(Node):
             self.tick,
             clock=Clock(clock_type=ClockType.STEADY_TIME),
         )
-        self.get_logger().info('Ready: waiting for GPS, odometry, and a goal.')
+        self.get_logger().info('Ready: waiting for odometry and a goal.')
 
     def on_scan(self, message: LaserScan) -> None:
         ranges = np.asarray(message.ranges, dtype=np.float32)
@@ -158,16 +179,17 @@ class HuskyMotion(Node):
         valid = np.isfinite(ranges)
         valid &= ranges >= message.range_min
         valid &= ranges <= min(message.range_max, self.planning_range)
-        if self.odom is not None and self.gps_position is not None and np.any(valid):
+        if self.odom is not None and np.any(valid):
             pose = self.odom.pose.pose
+            position = pose.position
             yaw = self.odom_heading
             local_x = ranges[valid] * np.cos(angles[valid])
             local_y = ranges[valid] * np.sin(angles[valid])
             cos_yaw = math.cos(yaw)
             sin_yaw = math.sin(yaw)
             self.scan_obstacle_points = np.column_stack((
-                self.gps_position[0] + cos_yaw * local_x - sin_yaw * local_y,
-                self.gps_position[1] + sin_yaw * local_x + cos_yaw * local_y,
+                position.x + cos_yaw * local_x - sin_yaw * local_y,
+                position.y + sin_yaw * local_x + cos_yaw * local_y,
             )).astype(np.float32)
             self.scan_received = True
 
@@ -189,10 +211,11 @@ class HuskyMotion(Node):
         if nearest_front_range > self.obstacle_distance or self.obstacle_detected:
             return
         pose = self.odom.pose.pose if self.odom is not None else None
-        if pose is not None and self.gps_position is not None and self.goal is not None:
+        if pose is not None and self.odom is not None and self.goal is not None:
+            position = pose.position
             candidate_path = plan_path(
-                self.gps_position[0],
-                self.gps_position[1],
+                position.x,
+                position.y,
                 np.array([self.goal.point.x, self.goal.point.y], dtype=np.float32),
                 self.scan_obstacle_points,
                 resolution=self.path_resolution,
@@ -326,7 +349,14 @@ class HuskyMotion(Node):
         self.calibrate_odom_world_offset()
 
     def on_mission_command(self, message: String) -> None:
-        if message.data == 'EMERGENCY_STOP':
+        if message.data in ('CLEAR_GOAL', 'DELETE_GOAL'):
+            self.goal = None
+            self.path = np.empty((0, 2), dtype=np.float32)
+            self.path_index = 0
+            self.recovery_until = 0.0
+            self.stop()
+            self.get_logger().info('Active goal cleared.')
+        elif message.data == 'EMERGENCY_STOP':
             self.estop_active = True
             self.goal = None
             self.stop()
@@ -348,10 +378,8 @@ class HuskyMotion(Node):
         if (
             self.odom is None
             or time.monotonic() - self.odom_received > self.odom_timeout
-            or self.gps_position is None
-            or time.monotonic() - self.gps_received > self.gps_timeout
         ):
-            self.get_logger().error('Rejected goal: waiting for fresh GPS and odometry.')
+            self.get_logger().error('Rejected goal: waiting for fresh odometry.')
             return
         if not matching_frame(message.header.frame_id, self.odom.header.frame_id):
             self.get_logger().error(
@@ -372,6 +400,10 @@ class HuskyMotion(Node):
         self.goal_started = time.monotonic()
         self.best_goal_distance = math.inf
         self.last_progress_time = self.goal_started
+        self.recovery_until = 0.0
+        self.recovery_turn_direction = 1.0
+        self.recovery_attempts = 0
+        self.last_command_linear = 0.0
         self.obstacle_detected = False
         self.path = np.empty((0, 2), dtype=np.float32)
         self.path_index = 0
@@ -385,6 +417,7 @@ class HuskyMotion(Node):
 
     def stop(self) -> None:
         self.publisher.publish(Twist())
+        self.last_command_linear = 0.0
 
     def tick(self) -> None:
         if self.estop_active:
@@ -397,7 +430,7 @@ class HuskyMotion(Node):
 
         now = time.monotonic()
 
-        if self.odom is None or self.gps_position is None:
+        if self.odom is None:
             self.stop()
             return
         if not matching_frame(self.odom.header.frame_id, self.goal.header.frame_id):
@@ -406,35 +439,78 @@ class HuskyMotion(Node):
 
         pose = self.odom.pose.pose
         target = self.goal.point
-        gps_position = self.gps_position
-        odom_position = self.odom_world_position()
-        if odom_position is None:
-            self.stop()
-            return
+        position = self.odom.pose.pose.position
+        world_position = np.array([position.x, position.y], dtype=np.float32)
         goal = np.array([target.x, target.y], dtype=np.float32)
-        distance = float(np.linalg.norm(goal - gps_position))
+        distance = float(np.linalg.norm(goal - world_position))
         if distance <= self.position_tolerance:
             self.get_logger().info(f'Arrived: {distance:.3f} m from target.')
             self.goal = None
             self.stop()
             return
 
+        if distance < self.best_goal_distance - self.minimum_progress:
+            self.best_goal_distance = distance
+            self.last_progress_time = now
+            self.recovery_attempts = 0
+
+        if self.last_command_linear <= 0.05:
+            self.last_progress_time = now
+
+        if self.recovery_until > now:
+            recovery = Twist()
+            recovery.linear.x = -self.stuck_recovery_speed
+            recovery.angular.z = (
+                self.recovery_turn_direction * self.stuck_recovery_turn_speed
+            )
+            self.publisher.publish(recovery)
+            self.last_command_linear = recovery.linear.x
+            return
+
+        if (
+            self.stuck_recovery_enabled
+            and now - self.last_progress_time >= self.progress_timeout
+        ):
+            if self.recovery_attempts >= self.max_stuck_recoveries:
+                self.get_logger().error(
+                    'Husky did not make progress after recovery attempts; '
+                    'cancelling the active goal.'
+                )
+                self.goal = None
+                self.stop()
+                return
+            self.recovery_until = now + self.stuck_recovery_duration
+            self.recovery_turn_direction *= -1.0
+            self.recovery_attempts += 1
+            self.last_progress_time = now
+            self.get_logger().warn(
+                'Husky appears stuck; reversing and turning to recover.'
+            )
+            recovery = Twist()
+            recovery.linear.x = -self.stuck_recovery_speed
+            recovery.angular.z = (
+                self.recovery_turn_direction * self.stuck_recovery_turn_speed
+            )
+            self.publisher.publish(recovery)
+            self.last_command_linear = recovery.linear.x
+            return
+
         if not self.scan_received:
             self.get_logger().warn(
-                'Lidar unavailable; obstacle stopping is disabled, '
-                'so following a direct GPS path.',
+                'Lidar unavailable; following a direct odometry path until '
+                'obstacle data is available.',
                 throttle_duration_sec=2.0,
             )
             self.path = np.array([
-                [gps_position[0], gps_position[1]],
+                [world_position[0], world_position[1]],
                 [goal[0], goal[1]],
             ], dtype=np.float32)
             self.path_index = 0
             self.path_replan_requested = False
         if self.path_replan_requested or not self.path.size:
             self.path = plan_path(
-                gps_position[0],
-                gps_position[1],
+                world_position[0],
+                world_position[1],
                 goal,
                 self.scan_obstacle_points,
                 resolution=self.path_resolution,
@@ -443,45 +519,47 @@ class HuskyMotion(Node):
             self.path_index = 0
             self.path_replan_requested = False
             if not self.path.size:
-                if not self.obstacle_stopping_enabled:
-                    self.path = np.array([
-                        [gps_position[0], gps_position[1]],
-                        [goal[0], goal[1]],
-                    ], dtype=np.float32)
-                    self.path_index = 0
-                    self.get_logger().warn(
-                        'No collision-free path found; obstacle stopping is '
-                        'disabled, so continuing directly to the goal.',
-                        throttle_duration_sec=2.0,
-                    )
-                else:
-                    self.get_logger().error('No collision-free path to goal; movement cancelled.')
-                    self.goal = None
-                    self.stop()
-                    return
+                self.get_logger().error(
+                    'No collision-free path to goal; movement cancelled.'
+                )
+                self.goal = None
+                self.stop()
+                return
 
         while self.path_index < len(self.path) - 1:
-            if np.linalg.norm(self.path[self.path_index] - odom_position) <= 0.35:
+            if np.linalg.norm(
+                self.path[self.path_index] - world_position
+            ) <= 0.35:
                 self.path_index += 1
             else:
                 break
         path_target = self.path[self.path_index]
-        dx = float(path_target[0] - odom_position[0])
-        dy = float(path_target[1] - odom_position[1])
+        dx = float(path_target[0] - world_position[0])
+        dy = float(path_target[1] - world_position[1])
 
-        heading = self.odom_heading
+        heading = wrap_angle(self.odom_heading + self.odom_to_world_heading)
         heading_error = wrap_angle(math.atan2(dy, dx) - heading)
         command = Twist()
-        command.angular.z = max(
+        requested_turn = max(
             -self.max_angular_speed,
             min(self.max_angular_speed, self.angular_gain * heading_error),
         )
+        if abs(heading_error) > self.heading_tolerance:
+            command.angular.z = math.copysign(
+                max(abs(requested_turn), self.min_turn_speed),
+                heading_error,
+            )
         forward_speed = min(self.max_speed, self.linear_gain * distance)
-        command.linear.x = forward_speed * max(
-            0.6,
-            1.0 - abs(heading_error) / math.pi,
+        # Rotate in place until the vehicle is facing the path target. Driving
+        # while nearly reversed makes a differential-drive Husky trace a large
+        # arc and can increase its distance from the goal.
+        command.linear.x = (
+            forward_speed
+            if abs(heading_error) <= self.heading_tolerance
+            else 0.0
         )
         self.publisher.publish(command)
+        self.last_command_linear = command.linear.x
 
 
 def main() -> None:

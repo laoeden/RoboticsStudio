@@ -10,7 +10,12 @@ from launch.actions import (
 )
 from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
-from launch.substitutions import Command, LaunchConfiguration, PathJoinSubstitution, PythonExpression
+from launch.substitutions import (
+    Command,
+    LaunchConfiguration,
+    PathJoinSubstitution,
+    PythonExpression,
+)
 from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
 from launch_ros.substitutions import FindPackageShare
@@ -295,7 +300,6 @@ def generate_launch_description():
     ld.add_action(world_dir_launch_arg)
 
     models_dir = PathJoinSubstitution([workspace_root, 'models'])
-
     ld.add_action(SetEnvironmentVariable(
         name='IGN_GAZEBO_RESOURCE_PATH',
         value=models_dir,
