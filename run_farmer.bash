@@ -5,6 +5,12 @@ cd "$(dirname "$0")"
 source /opt/ros/humble/setup.bash
 source install/setup.bash
 
+PYTHON="$PWD/yolo_env/bin/python"
+if [[ ! -x "$PYTHON" ]]; then
+	echo "Missing Python environment: $PYTHON" >&2
+	exit 1
+fi
+
 echo "Starting FARMER simulation..."
 
 # 1. Start Gazebo with Husky + Parrot
@@ -20,22 +26,22 @@ SIM_PID=$!
 sleep 8
 
 # 2. Start drone coordinate controller
-python3 DroneStuff/DroneMotion.py &
+"$PYTHON" DroneStuff/DroneMotion.py &
 
 DRONE_PID=$!
 
 # Start Husky coordinate controller
-python3 HuskyScripts/HuskyMotion.py &
+"$PYTHON" HuskyScripts/HuskyMotion.py &
 
 HUSKY_PID=$!
 
 # Remove grass patches as the Husky approaches them.
-python3 HuskyScripts/grassRemover.py &
+"$PYTHON" HuskyScripts/grassRemover.py &
 
 GRASS_PID=$!
 
 # Battery simulation for the Husky (charging pad at the origin)
-python3 Mission/battery_node.py &
+"$PYTHON" Mission/battery_node.py &
 
 BATTERY_PID=$!
 
@@ -47,7 +53,7 @@ sleep 2
 #CAMERA_RISK_PID=$!
 
 # 4. Start FARMER control station
-python3 UI/farmer_ui.py &
+"$PYTHON" UI/farmer_ui.py &
 
 UI_PID=$!
 

@@ -109,8 +109,6 @@ uav_x = None
 uav_y = None
 uav_z = None
 uav_odom_history = []
-previous_uav_x = None
-previous_uav_y = None
 spiral_active = False
 spiral_targets = []
 spiral_index = 0
@@ -1226,11 +1224,9 @@ MAP_ORIGIN_X = 405
 MAP_ORIGIN_Y = 315
 MAP_SCALE = 25
 
-def world_to_map(x, y, center_x=0.0, center_y=0.0):
-    map_center_x = canvas.winfo_width() / 2
-    map_center_y = canvas.winfo_height() / 2
-    map_x = map_center_x + ((x - center_x) * MAP_SCALE)
-    map_y = map_center_y - ((y - center_y) * MAP_SCALE)
+def world_to_map(x, y):
+    map_x = MAP_ORIGIN_X + (x * MAP_SCALE)
+    map_y = MAP_ORIGIN_Y - (y * MAP_SCALE)
 
     return map_x, map_y
 
@@ -1531,22 +1527,9 @@ def get_synced_uav_position():
 
 
 def update_telemetry_ui():
-    global previous_uav_x, previous_uav_y
-
     advance_spiral()
 
     display_uav_x, display_uav_y, display_uav_z = get_synced_uav_position()
-
-    if display_uav_x is not None and display_uav_y is not None:
-        if previous_uav_x is not None and previous_uav_y is not None:
-            # Move the map features in the opposite direction of the UAV's movement to keep the UAV centered
-            canvas.move(
-                "map_feature",
-                (previous_uav_x - display_uav_x) * MAP_SCALE,
-                (display_uav_y - previous_uav_y) * MAP_SCALE,
-            )
-    previous_uav_x = display_uav_x
-    previous_uav_y = display_uav_y
 
     if battery_level is not None:
         suffix = " CHG" if charging_flag else (" LOW" if battery_low_flag else "")
@@ -1574,9 +1557,7 @@ def update_telemetry_ui():
     if ugv_x is not None and ugv_y is not None:
         map_x, map_y = world_to_map(
             ugv_x,
-            ugv_y,
-            display_uav_x or 0.0,
-            display_uav_y or 0.0
+            ugv_y
         )
 
         canvas.coords(
@@ -1593,8 +1574,6 @@ def update_telemetry_ui():
     # Move UAV marker
     if display_uav_x is not None and display_uav_y is not None:
         map_x, map_y = world_to_map(
-            display_uav_x,
-            display_uav_y,
             display_uav_x,
             display_uav_y
         )
@@ -1886,7 +1865,7 @@ def draw_grass_pinpoints():
             )
             pinpoint_items[pin["id"]] = marker, label
         marker, label = pinpoint_items[pin["id"]]
-        x, y = world_to_map(pin["x"], pin["y"], uav_x or 0.0, uav_y or 0.0)
+        x, y = world_to_map(pin["x"], pin["y"])
         canvas.coords(marker, x - 6, y - 6, x + 6, y + 6)
         canvas.coords(label, x, y + 24)
 

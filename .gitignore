@@ -8,6 +8,8 @@ install/
 log/
 VS_tests/
 weights/
+runs/
+yolo11n.pt
 
 world/WorldWithTerrian.sdf
 models/GreyHeatMap/
