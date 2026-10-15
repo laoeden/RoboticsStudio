@@ -1,0 +1,2 @@
+# Python dependencies for infer_yolo_camera.py
+ultralytics==8.4.176
