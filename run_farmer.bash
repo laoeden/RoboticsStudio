@@ -81,3 +81,8 @@ echo "UI PID: $UI_PID"
 
 # Keep launcher alive
 wait
+
+####### NEED TO INSTALL YOLO ENVIRONMENT #######
+# python3 -m venv yolo_env
+# source yolo_env/bin/activate
+# pip install -r requirements-yolo.txt
