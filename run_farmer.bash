@@ -52,6 +52,11 @@ sleep 2
 
 #CAMERA_RISK_PID=$!
 
+# Start YOLO inference on the drone camera
+"$PYTHON" infer_yolo_camera.py &
+
+CAMERA_INFERENCE_PID=$!
+
 # 4. Start FARMER control station
 "$PYTHON" UI/farmer_ui.py &
 
@@ -59,7 +64,7 @@ UI_PID=$!
 
 cleanup() {
 	trap - INT TERM EXIT
-	kill "$UI_PID" "$BATTERY_PID" "$GRASS_PID" "$HUSKY_PID" "$DRONE_PID" "$SIM_PID" 2>/dev/null || true
+	kill "$UI_PID" "$CAMERA_INFERENCE_PID" "$BATTERY_PID" "$GRASS_PID" "$HUSKY_PID" "$DRONE_PID" "$SIM_PID" 2>/dev/null || true
 	wait 2>/dev/null || true
 }
 
@@ -71,6 +76,7 @@ echo "Drone controller PID: $DRONE_PID"
 echo "Husky controller PID: $HUSKY_PID"
 echo "Grass remover PID: $GRASS_PID"
 echo "Battery node PID: $BATTERY_PID"
+echo "Camera inference PID: $CAMERA_INFERENCE_PID"
 echo "UI PID: $UI_PID"
 
 # Keep launcher alive
