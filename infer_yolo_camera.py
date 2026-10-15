@@ -31,7 +31,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "model",
-        default="runs/detect/weights/dry_grass/weights/best.pt",
+        default="my_model/my_model.pt",
         nargs="?",
     )
     parser.add_argument("--topic", default="/parrot1/camera/image")
