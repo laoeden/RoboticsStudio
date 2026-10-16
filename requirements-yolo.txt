@@ -1,2 +1,5 @@
 # Python dependencies for infer_yolo_camera.py
+# ROS Humble's cv_bridge currently requires the NumPy 1.x ABI.
+numpy<2
+opencv-python==4.11.0.86
 ultralytics==8.4.176
