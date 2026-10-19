@@ -5,11 +5,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(REPO_ROOT) not in sys.path:
     sys.path.append(str(REPO_ROOT))
 
-from DroneStuff.camera_risk import (
-    process_frame, build_mask_from_values, build_texture_mask_from_value,
-    find_objects, camera_to_base, rotate_by_quaternion, FX, FY, CX, CY,
-)
-from UI.grass_pinpoints import GrassPinpoints, match_pin_samples
+from UI.grass_pinpoints import GrassPinpoints
 from collections import deque
 from HuskyScripts.grid_path_planner import plan_path
 
@@ -69,12 +65,8 @@ bridge = CvBridge()
 latest_rgb = None
 latest_rgb_time = None
 rgb_frame_count = 0
-latest_depth = None
-rgb_sample = None
-depth_sample = None
+latest_yolo_image = None
 drone_odom_sample = None
-rgb_pin_samples = deque(maxlen=20)
-depth_pin_samples = deque(maxlen=20)
 odom_pin_samples = deque(maxlen=100)
 last_pinpoint_stamp = None
 grass_pinpoints = GrassPinpoints(REPO_ROOT / "UI" / "dry_grass_pinpoints.json")
@@ -82,9 +74,6 @@ pinpoint_items = {}
 camera_risk_lock = threading.Lock()
 camera_risk_wakeup = threading.Event()
 camera_risk_stop = threading.Event()
-camera_risk_job = None
-camera_risk_result = None
-camera_risk_config = None
 camera_risk_husky_position = None
 camera_risk_pending_goals = []
 camera_risk_active_goal = None
@@ -92,6 +81,7 @@ camera_risk_goal_published = 0
 camera_risk_goal_tolerance = 0.2
 camera_risk_duplicate_radius = 1.0
 camera_risk_logs = queue.Queue()
+yolo_detection_queue = queue.Queue()
 
 
 def message_time(msg):
@@ -212,8 +202,44 @@ drone_odom_sub = ros_node.create_subscription(
     10
 )
 
+
+def yolo_world_position_callback(msg):
+    yolo_detection_queue.put((
+        np.array([msg.point.x, msg.point.y, msg.point.z], dtype=np.float32),
+        msg.header.frame_id,
+        message_time(msg),
+    ))
+
+
+yolo_world_position_sub = ros_node.create_subscription(
+    PointStamped,
+    "/parrot1/yolo/world_position",
+    yolo_world_position_callback,
+    10,
+)
+
+
+def yolo_image_callback(msg):
+    global latest_yolo_image
+
+    try:
+        latest_yolo_image = bridge.imgmsg_to_cv2(msg, desired_encoding="bgr8")
+    except Exception as error:
+        ros_node.get_logger().error(
+            f"YOLO image conversion failed: {error}"
+        )
+
+
+yolo_image_sub = ros_node.create_subscription(
+    RosImage,
+    "/parrot1/yolo/image",
+    yolo_image_callback,
+    10,
+)
+
+
 def rgb_callback(msg):
-    global latest_rgb, latest_rgb_time, rgb_frame_count, rgb_sample
+    global latest_rgb, latest_rgb_time, rgb_frame_count
 
     try:
         latest_rgb = bridge.imgmsg_to_cv2(msg, desired_encoding="bgr8")
@@ -224,8 +250,6 @@ def rgb_callback(msg):
         )
 
         rgb_frame_count += 1
-        rgb_sample = (latest_rgb, message_time(msg))
-        rgb_pin_samples.append(rgb_sample)
     except Exception as error:
         ros_node.get_logger().error(f"RGB image conversion failed: {error}")
 
@@ -234,50 +258,6 @@ rgb_sub = ros_node.create_subscription(
     RosImage,
     "/parrot1/camera/image",
     rgb_callback,
-    10
-)
-
-def depth_callback(msg):
-    global latest_depth, depth_sample
-
-    try:
-        if msg.encoding == "32FC1":
-            dtype = np.float32
-        elif msg.encoding == "16UC1":
-            dtype = np.uint16
-        else:
-            ros_node.get_logger().error(
-                f"Unsupported depth encoding: {msg.encoding}"
-            )
-            return
-
-        bytes_per_pixel = np.dtype(dtype).itemsize
-
-        depth = np.frombuffer(
-            msg.data,
-            dtype=dtype
-        ).reshape(
-            msg.height,
-            msg.step // bytes_per_pixel
-        )[:, :msg.width].copy()
-
-        if msg.encoding == "16UC1":
-            depth = depth.astype(np.float32) / 1000.0
-
-        latest_depth = depth
-        depth_sample = (depth, message_time(msg))
-        depth_pin_samples.append(depth_sample)
-
-    except Exception as error:
-        ros_node.get_logger().error(
-            f"Depth conversion failed: {error}"
-        )
-
-
-depth_sub = ros_node.create_subscription(
-    RosImage,
-    "/parrot1/camera/depth/image",
-    depth_callback,
     10
 )
 
@@ -761,48 +741,11 @@ camera_risk_controls.grid_propagate(False)
 
 tk.Label(
     camera_risk_controls,
-    text="CAMERA RISK CONTROLS",
+    text="YOLO DETECTION CONTROLS",
     bg=PANEL,
     fg=GREEN_BRIGHT,
     font=("DejaVu Sans Mono", 11, "bold")
 ).pack(anchor="w", padx=15, pady=15)
-
-def risk_slider(label, minimum, maximum, default):
-    tk.Label(
-        camera_risk_controls,
-        text=label,
-        bg=PANEL,
-        fg=TEXT,
-        font=("DejaVu Sans Mono", 9)
-    ).pack(anchor="w", padx=15, pady=(4, 0))
-
-    slider = tk.Scale(
-        camera_risk_controls,
-        from_=minimum,
-        to=maximum,
-        orient="horizontal",
-        bg=PANEL,
-        fg=TEXT,
-        highlightthickness=0,
-        length=280
-    )
-
-    slider.set(default)
-    slider.pack(padx=15)
-
-    return slider
-
-
-risk_hue = risk_slider("Hue", 0, 179, 15)
-risk_saturation = risk_slider("Saturation", 0, 255, 180)
-risk_value = risk_slider("Value", 0, 255, 150)
-
-risk_hue_tolerance = risk_slider("Hue tolerance %", 0, 50, 8)
-risk_saturation_tolerance = risk_slider("Saturation tolerance %", 0, 50, 12)
-risk_value_tolerance = risk_slider("Value tolerance %", 0, 50, 20)
-
-risk_texture_variance = risk_slider("Texture variance", 0, 1000, 0)
-risk_texture_fraction = risk_slider("Texture fraction %", 0, 100, 0)
 
 auto_pinpoints = tk.BooleanVar(value=True)
 tk.Checkbutton(
@@ -1870,21 +1813,15 @@ def draw_grass_pinpoints():
         canvas.coords(label, x, y + 24)
 
 
-def camera_risk_worker():
-    global camera_risk_job, camera_risk_result
-    global camera_risk_config, camera_risk_active_goal
-    global camera_risk_goal_published
-    last_stamp = None
+def yolo_detection_worker():
+    global camera_risk_active_goal, camera_risk_goal_published
     while not camera_risk_stop.is_set():
         camera_risk_wakeup.wait(0.2)
         camera_risk_wakeup.clear()
         if camera_risk_stop.is_set():
             break
         with camera_risk_lock:
-            job = camera_risk_job
-            config = camera_risk_config
             husky_position = camera_risk_husky_position
-            camera_risk_job = None
             if (
                 camera_risk_active_goal is not None
                 and husky_position is not None
@@ -1893,7 +1830,7 @@ def camera_risk_worker():
                     husky_position[1] - camera_risk_active_goal[1],
                 ) <= camera_risk_goal_tolerance
             ):
-                camera_risk_logs.put(("GOAL", "Camera-risk goal reached"))
+                camera_risk_logs.put(("GOAL", "YOLO goal reached"))
                 camera_risk_active_goal = None
             if camera_risk_active_goal is None and camera_risk_pending_goals:
                 camera_risk_active_goal = camera_risk_pending_goals.pop(0)
@@ -1904,147 +1841,55 @@ def camera_risk_worker():
                 camera_risk_goal_published += 1
                 camera_risk_logs.put((
                     "GOAL",
-                    f"Camera-risk Husky goal sent: "
+                    f"YOLO Husky goal sent: "
                     f"({camera_risk_active_goal[0]:.2f}, "
                     f"{camera_risk_active_goal[1]:.2f})",
                 ))
-        if job is None or config is None:
-            continue
-
-        image, depth, odometry, stamp = job
-        if stamp == last_stamp:
-            continue
-        last_stamp = stamp
-        try:
-            (
-                hue, saturation, value, hue_tolerance,
-                saturation_tolerance, value_tolerance,
-                texture_variance, texture_fraction, auto_pin,
-            ) = config
-            processed = process_frame(
-                image, depth, hue, saturation, value,
-                hue_tolerance, saturation_tolerance, value_tolerance,
-                texture_variance, texture_fraction,
-            )
-            points = []
-            if depth is not None and odometry is not None:
-                mask = build_mask_from_values(
-                    image, hue, saturation, value,
-                    hue_tolerance, saturation_tolerance, value_tolerance,
-                )
-                texture = build_texture_mask_from_value(image, texture_variance)
-                height, width = image.shape[:2]
-                objects = find_objects(
-                    mask, depth, texture, texture_fraction / 100.0,
-                    fx=FX * width / 720, fy=FY * height / 480,
-                    cx=CX * width / 720, cy=CY * height / 480,
-                )
-                pose = odometry.pose.pose
-                rotation = np.array([
-                    pose.orientation.x, pose.orientation.y,
-                    pose.orientation.z, pose.orientation.w,
-                ])
-                position = np.array([
-                    pose.position.x, pose.position.y, pose.position.z
-                ])
-                points = [
-                    rotate_by_quaternion(camera_to_base(point), rotation) + position
-                    for _, _, _, point in objects if point is not None
-                ]
-
-            with camera_risk_lock:
-                if auto_pin and odometry is not None:
-                    added = grass_pinpoints.observe(
-                        points, odometry.header.frame_id, stamp
-                    )
-                else:
-                    added = []
-                known = [
-                    point[:2] for point in camera_risk_pending_goals
-                ]
-                if camera_risk_active_goal is not None:
-                    known.append(camera_risk_active_goal[:2])
-                for point in points:
-                    if any(
-                        np.linalg.norm(point[:2] - old_point)
-                        < camera_risk_duplicate_radius
-                        for old_point in known
-                    ):
-                        continue
-                    camera_risk_pending_goals.append(point.copy())
-                    known.append(point[:2].copy())
-            for pin in added:
-                camera_risk_logs.put((
-                    "GRASS",
-                    f"Pinned #{pin['id']} at "
-                    f"({pin['x']:.2f}, {pin['y']:.2f})",
-                ))
-            with camera_risk_lock:
-                pin_count = len(grass_pinpoints.pins)
-            with camera_risk_lock:
-                camera_risk_result = (processed, pin_count, None)
-        except Exception as error:
-            with camera_risk_lock:
-                camera_risk_result = (None, None, str(error))
-
-
-def submit_camera_risk_job():
-    global camera_risk_job, camera_risk_config
-    if rgb_sample is None:
-        return
-    rgb = rgb_sample
-    depth = None
-    odometry = None
-    matched = match_pin_samples(tuple(rgb_pin_samples), tuple(depth_pin_samples),
-                                tuple(odom_pin_samples))
-    if matched is not None:
-        newest_stamp = max(sample[1] for sample in
-                           (rgb_sample, depth_sample, drone_odom_sample)
-                           if sample is not None)
-        if newest_stamp - matched[0][1] <= 0.5:
-            rgb, depth, odometry = matched
-    config = (
-        risk_hue.get(), risk_saturation.get(), risk_value.get(),
-        risk_hue_tolerance.get(), risk_saturation_tolerance.get(),
-        risk_value_tolerance.get(), risk_texture_variance.get(),
-        risk_texture_fraction.get(), auto_pinpoints.get(),
-    )
-    with camera_risk_lock:
-        camera_risk_job = (
-            rgb[0].copy(),
-            None if depth is None else depth[0].copy(),
-            None if odometry is None else odometry[0],
-            rgb[1],
-        )
-        camera_risk_config = config
-    camera_risk_wakeup.set()
-
-
 def update_camera_risk_ui():
-    global camera_risk_result
-    submit_camera_risk_job()
     with camera_risk_lock:
-        result = camera_risk_result
-        camera_risk_result = None
         pin_count = len(grass_pinpoints.pins)
+    while not yolo_detection_queue.empty():
+        point, frame_id, stamp = yolo_detection_queue.get_nowait()
+        with camera_risk_lock:
+            known = [candidate[:2] for candidate in camera_risk_pending_goals]
+            if camera_risk_active_goal is not None:
+                known.append(camera_risk_active_goal[:2])
+            if any(
+                np.linalg.norm(point[:2] - old_point)
+                < camera_risk_duplicate_radius
+                for old_point in known
+            ):
+                continue
+            camera_risk_pending_goals.append(point)
+            if auto_pinpoints.get():
+                added = grass_pinpoints.observe(
+                    [point], frame_id, stamp
+                )
+            else:
+                added = []
+        for pin in added:
+            add_log(
+                "GRASS",
+                f"Pinned #{pin['id']} at "
+                f"({pin['x']:.2f}, {pin['y']:.2f})",
+            )
+        camera_risk_wakeup.set()
+
     while not camera_risk_logs.empty():
         source, message = camera_risk_logs.get_nowait()
         add_log(source, message)
-    if result is not None:
-        processed, pin_count, error = result
-        if error:
-            pinpoint_status.config(text=f"Camera-risk error: {error}")
-        elif processed is not None:
-            processed = cv2.cvtColor(processed, cv2.COLOR_BGR2RGB)
-            risk_image = PILImage.fromarray(processed)
-            risk_image.thumbnail((1100, 650), PILImage.LANCZOS)
-            risk_photo = ImageTk.PhotoImage(image=risk_image)
-            camera_risk_display.config(image=risk_photo, text="")
-            camera_risk_display.image = risk_photo
-    elif rgb_sample is None:
+    if latest_yolo_image is not None:
+        risk_image = PILImage.fromarray(
+            cv2.cvtColor(latest_yolo_image, cv2.COLOR_BGR2RGB)
+        )
+        risk_image.thumbnail((1100, 650), PILImage.LANCZOS)
+        risk_photo = ImageTk.PhotoImage(image=risk_image)
+        camera_risk_display.config(image=risk_photo, text="")
+        camera_risk_display.image = risk_photo
+    else:
         camera_risk_display.config(
             image="",
-            text="CAMERA RISK FEED WAITING FOR RGB",
+            text="YOLO FEED WAITING FOR ANNOTATED IMAGE",
         )
     if not auto_pinpoints.get():
         pinpoint_status.config(text=f"Pinning paused | Saved: {pin_count}")
@@ -2054,7 +1899,7 @@ def update_camera_risk_ui():
 
 
 camera_risk_thread = threading.Thread(
-    target=camera_risk_worker,
+    target=yolo_detection_worker,
     daemon=True,
     name="CAMERA_RISK_THREAD",
 )

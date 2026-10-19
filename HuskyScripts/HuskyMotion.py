@@ -74,11 +74,11 @@ class HuskyMotion(Node):
             'max_stuck_recoveries': 2,
             'obstacle_stopping_enabled': True,
             'progress_stopping_enabled': False,
-            'obstacle_distance': 1.0,
+            'obstacle_distance': 1.5,
             'front_angle': math.pi / 4.0,
             'planning_range': 5.0,
             'path_resolution': 0.2,
-            'robot_clearance': 1.0,
+            'robot_clearance': 2.0,
             # Lidar hits this close to the charging pad are ignored: the pad and its
             # marker are part of the dock, not obstacles to avoid.
             'dock_clear_radius': 1.6,
