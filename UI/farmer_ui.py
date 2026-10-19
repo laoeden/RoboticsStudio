@@ -62,10 +62,9 @@ rclpy.init()
 
 ros_node = Node("farmer_control_station")
 bridge = CvBridge()
-latest_rgb = None
-latest_rgb_time = None
-rgb_frame_count = 0
 latest_yolo_image = None
+latest_husky_depth = None
+depth_frame_count = 0
 drone_odom_sample = None
 odom_pin_samples = deque(maxlen=100)
 last_pinpoint_stamp = None
@@ -238,27 +237,43 @@ yolo_image_sub = ros_node.create_subscription(
 )
 
 
-def rgb_callback(msg):
-    global latest_rgb, latest_rgb_time, rgb_frame_count
+def husky_depth_callback(msg):
+    global latest_husky_depth, depth_frame_count
 
     try:
-        latest_rgb = bridge.imgmsg_to_cv2(msg, desired_encoding="bgr8")
-
-        latest_rgb_time = (
-            msg.header.stamp.sec
-            + msg.header.stamp.nanosec * 1e-9
+        if msg.encoding == "32FC1":
+            dtype = np.float32
+            scale = 1.0
+        elif msg.encoding == "16UC1":
+            dtype = np.uint16
+            scale = 0.001
+        else:
+            raise ValueError(
+                f"Unsupported depth encoding: {msg.encoding!r}"
+            )
+        bytes_per_pixel = np.dtype(dtype).itemsize
+        row_bytes = msg.width * bytes_per_pixel
+        if msg.step < row_bytes:
+            raise ValueError(
+                f"Invalid depth step {msg.step} for width {msg.width}"
+            )
+        depth = np.frombuffer(msg.data, dtype=dtype).reshape(
+            msg.height, msg.step // bytes_per_pixel
+        )[:, :msg.width].astype(np.float32, copy=True)
+        latest_husky_depth = depth * scale
+        depth_frame_count += 1
+    except (TypeError, ValueError) as error:
+        ros_node.get_logger().error(
+            f"Husky depth conversion failed: {error}",
+            throttle_duration_sec=2.0,
         )
 
-        rgb_frame_count += 1
-    except Exception as error:
-        ros_node.get_logger().error(f"RGB image conversion failed: {error}")
 
-
-rgb_sub = ros_node.create_subscription(
+husky_depth_sub = ros_node.create_subscription(
     RosImage,
-    "/parrot1/camera/image",
-    rgb_callback,
-    10
+    "/husky1/camera/depth/image",
+    husky_depth_callback,
+    10,
 )
 
 def ros_spin():
@@ -1081,22 +1096,22 @@ camera_panel.grid(row=0, column=1, sticky="nsew", padx=(8, 0))
 
 tk.Label(
     camera_panel,
-    text="PARROT RGB CAMERA",
+    text="HUSKY DEPTH CAMERA",
     bg=PANEL,
     fg=GREEN_BRIGHT,
     font=("DejaVu Sans Mono", 10, "bold")
 ).pack(anchor="w", padx=12, pady=8)
 
-rgb_camera_label = tk.Label(
+depth_camera_label = tk.Label(
     camera_panel,
-    text="RGB FEED WAITING",
+    text="DEPTH FEED WAITING",
     bg="#050805",
     fg=TEXT_DIM,
     font=("DejaVu Sans Mono", 10),
     width=52,
     height=24
 )
-rgb_camera_label.pack(fill="both", expand=True, padx=8, pady=(0, 8))
+depth_camera_label.pack(fill="both", expand=True, padx=8, pady=(0, 8))
 
 
 # Grid
@@ -1458,16 +1473,7 @@ def advance_spiral():
     publish_drone_goal(*spiral_targets[spiral_index])
 
 def get_synced_uav_position():
-    if latest_rgb_time is None or not uav_odom_history:
-        return uav_x, uav_y, uav_z
-
-    closest = min(
-        uav_odom_history,
-        key=lambda sample: abs(sample[0] - latest_rgb_time)
-    )
-
-    _, synced_x, synced_y, synced_z = closest
-    return synced_x, synced_y, synced_z
+    return uav_x, uav_y, uav_z
 
 
 def update_telemetry_ui():
@@ -1537,29 +1543,41 @@ def update_telemetry_ui():
 
     draw_grass_pinpoints()
 
-    # Update RGB camera
-    rendered_rgb = False
-
-    if latest_rgb is not None:
+    rendered_depth = False
+    if latest_husky_depth is not None:
         try:
-            rgb_image = cv2.cvtColor(latest_rgb, cv2.COLOR_BGR2RGB)
-            rgb_image = PILImage.fromarray(rgb_image)
-            rgb_image.thumbnail((620, 500), PILImage.LANCZOS)
-            rgb_photo = ImageTk.PhotoImage(image=rgb_image)
+            valid = np.isfinite(latest_husky_depth) & (latest_husky_depth > 0.0)
+            if np.any(valid):
+                near = 0.4
+                far = 10.0
+                normalized_depth = np.zeros_like(
+                    latest_husky_depth,
+                    dtype=np.uint8,
+                )
+                normalized_depth[valid] = np.clip(
+                    (far - latest_husky_depth[valid]) * 255.0 / (far - near),
+                    0,
+                    255,
+                ).astype(np.uint8)
+                heatmap = cv2.applyColorMap(
+                    normalized_depth,
+                    cv2.COLORMAP_TURBO,
+                )
+                heatmap[~valid] = (0, 0, 0)
+                heatmap = cv2.cvtColor(heatmap, cv2.COLOR_BGR2RGB)
+                depth_image = PILImage.fromarray(heatmap)
+                depth_image.thumbnail((1100, 650), PILImage.LANCZOS)
+                depth_photo = ImageTk.PhotoImage(image=depth_image)
+                depth_camera_label.config(image=depth_photo, text="")
+                depth_camera_label.image = depth_photo
+                rendered_depth = True
+        except (TypeError, ValueError) as error:
+            depth_camera_label.config(text=f"DEPTH DISPLAY ERROR\n{error}")
 
-            rgb_camera_label.config(image=rgb_photo, text="")
-            rgb_camera_label.image = rgb_photo
-            rendered_rgb = True
-
-        except Exception as error:
-            rgb_camera_label.config(
-                text=f"RGB DISPLAY ERROR\n{error}"
-            )
-
-    if rgb_frame_count == 0:
-        rgb_camera_label.config(text="RGB FEED WAITING")
-    elif not rendered_rgb:
-        rgb_camera_label.config(text="RGB DISPLAY ERROR")
+    if depth_frame_count == 0:
+        depth_camera_label.config(text="DEPTH FEED WAITING")
+    elif not rendered_depth:
+        depth_camera_label.config(text="DEPTH DISPLAY ERROR")
 
     root.after(100, update_telemetry_ui)
 
