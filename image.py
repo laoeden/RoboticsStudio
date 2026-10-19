@@ -11,7 +11,7 @@ class ImageViewer(Node):
         self.bridge = CvBridge()
         self.depth_subscription = self.create_subscription(
             Image,
-            '/parrot1/camera/depth/image',
+            '/husky1/camera/depth/image',
             self.depth_callback,
             10)
         self.rgb_subscription = self.create_subscription(
