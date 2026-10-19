@@ -360,6 +360,7 @@ def start_mission():
 
     publish_command("START")
 
+################ SPIRAL ##################
     spiral_center_x = 0.0 # this can later be adjusted through the UI or mission parameters
     spiral_center_y = 0.0
 
