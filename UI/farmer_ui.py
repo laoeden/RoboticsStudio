@@ -75,6 +75,7 @@ camera_risk_wakeup = threading.Event()
 camera_risk_stop = threading.Event()
 camera_risk_husky_position = None
 camera_risk_pending_goals = []
+husky_dispatch_enabled = False
 camera_risk_active_goal = None
 camera_risk_goal_published = 0
 camera_risk_goal_tolerance = 0.2
@@ -373,6 +374,8 @@ def add_log(source, message):
 def start_mission():
     global spiral_active, spiral_targets, spiral_index
 
+    pause_husky_dispatch()
+    publish_command("STOP")
     publish_command("START")
 
 ################ SPIRAL ##################
@@ -400,9 +403,42 @@ def start_mission():
     add_log("SYSTEM", "MISSION STARTED")
 
 
+def pause_husky_dispatch():
+    """Keep collected targets for a later manual start."""
+    global husky_dispatch_enabled, camera_risk_active_goal
+    with camera_risk_lock:
+        husky_dispatch_enabled = False
+        if camera_risk_active_goal is not None:
+            camera_risk_pending_goals.insert(0, camera_risk_active_goal)
+            camera_risk_active_goal = None
+
+
+def start_husky():
+    """Release collected coordinates independently of the detection source."""
+    global husky_dispatch_enabled
+    if estop_active:
+        return
+    if spiral_active:
+        add_log("UGV", "Wait for the drone survey to finish before starting Husky")
+        return
+    with camera_risk_lock:
+        if husky_dispatch_enabled:
+            return
+        if not camera_risk_pending_goals:
+            add_log("UGV", "No collected coordinates available yet")
+            return
+        husky_dispatch_enabled = True
+        target_count = len(camera_risk_pending_goals)
+    camera_risk_wakeup.set()
+    status_value.config(text="ACTIVE", fg=GREEN_BRIGHT)
+    mission_value.config(text="HUSKY EXECUTING")
+    add_log("UGV", f"Husky started with {target_count} queued coordinates")
+
+
 def stop_mission():
     global spiral_active
 
+    pause_husky_dispatch()
     publish_command("STOP")
     spiral_active = False
 
@@ -414,6 +450,7 @@ def stop_mission():
 def return_to_base():
     global spiral_active
 
+    pause_husky_dispatch()
     publish_command("RETURN_TO_BASE")
     spiral_active = False
 
@@ -431,6 +468,7 @@ def emergency_stop():
 
     controls = [
         start_button,
+        start_husky_button,
         stop_button,
         rtb_button,
         send_goal_button,
@@ -443,6 +481,7 @@ def emergency_stop():
     ]
 
     if estop_active:
+        pause_husky_dispatch()
         publish_command("EMERGENCY_STOP")
         spiral_active = False
 
@@ -987,7 +1026,8 @@ def tactical_button(text, command, colour=TEXT):
     return button
 
 
-start_button = tactical_button("[ START MISSION ]", start_mission, GREEN_BRIGHT)
+start_button = tactical_button("[ START DRONE M ]", start_mission, GREEN_BRIGHT)
+start_husky_button = tactical_button("[ START HUSKY M]", start_husky, GREEN_BRIGHT)
 stop_button = tactical_button("[ STOP ]", stop_mission, AMBER)
 rtb_button = tactical_button("[ RETURN TO BASE ]", return_to_base)
 estop_button = tactical_button("[ EMERGENCY STOP ]", emergency_stop, RED)
@@ -1467,6 +1507,8 @@ def advance_spiral():
     if spiral_index == len(spiral_targets) - 1:
         spiral_active = False
         add_log("UAV", "SPIRAL COMPLETE")
+        mission_value.config(text="SURVEY COMPLETE")
+        add_log("UGV", "Coordinates collected — press START HUSKY when ready")
         return
 
     spiral_index += 1
@@ -1851,7 +1893,11 @@ def yolo_detection_worker():
             ):
                 camera_risk_logs.put(("GOAL", "YOLO goal reached"))
                 camera_risk_active_goal = None
-            if camera_risk_active_goal is None and camera_risk_pending_goals:
+            if (
+                husky_dispatch_enabled
+                and camera_risk_active_goal is None
+                and camera_risk_pending_goals
+            ):
                 camera_risk_active_goal = camera_risk_pending_goals.pop(0)
                 publish_husky_goal(
                     float(camera_risk_active_goal[0]),
