@@ -29,6 +29,7 @@ from PIL import Image as PILImage, ImageTk
 
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+from matplotlib.patches import Circle
 
 from geometry_msgs.msg import PointStamped
 
@@ -79,9 +80,15 @@ husky_dispatch_enabled = False
 camera_risk_active_goal = None
 camera_risk_goal_published = 0
 camera_risk_goal_tolerance = 0.2
-camera_risk_duplicate_radius = 1.0
+camera_risk_duplicate_radius = 2.0
+camera_risk_completed_goals = []
 camera_risk_logs = queue.Queue()
 yolo_detection_queue = queue.Queue()
+MAIN_LIDAR_MAX_POINTS = 150
+MAIN_MAP_UPDATE_PERIOD_MS = 500
+DEPTH_DISPLAY_PERIOD_MS = 200
+DEPTH_DISPLAY_SCALE = 0.5
+HUSKY_GRASS_EXCLUSION_RADIUS = 3.5
 
 
 def message_time(msg):
@@ -164,6 +171,33 @@ def husky_goal_callback(msg):
         float(msg.point.x),
         float(msg.point.y)
     )
+
+
+def husky_obstacle_stop_callback(msg):
+    global camera_risk_active_goal, latest_husky_goal
+    if not msg.data:
+        return
+    with camera_risk_lock:
+        blocked_goal = camera_risk_active_goal
+        camera_risk_active_goal = None
+    if blocked_goal is not None:
+        if latest_husky_goal == tuple(blocked_goal[:2]):
+            latest_husky_goal = None
+        camera_risk_logs.put((
+            "GOAL",
+            f"Skipped blocked Husky goal at "
+            f"({blocked_goal[0]:.2f}, {blocked_goal[1]:.2f}); "
+            "continuing with next goal.",
+        ))
+    camera_risk_wakeup.set()
+
+
+husky_obstacle_stop_sub = ros_node.create_subscription(
+        Bool,
+        "/husky1/obstacle_stop",
+        husky_obstacle_stop_callback,
+        10,
+)
 
 
 husky_goal_sub = ros_node.create_subscription(
@@ -726,6 +760,17 @@ lidar_robot_heading, = lidar_map_axis.plot(
     color="black",
     linewidth=2
 )
+lidar_grass_exclusion = Circle(
+    (0.0, 0.0),
+    HUSKY_GRASS_EXCLUSION_RADIUS,
+    fill=False,
+    edgecolor="#d3aa55",
+    linestyle="--",
+    linewidth=2,
+    label="Grass exclusion",
+    visible=False,
+)
+lidar_map_axis.add_patch(lidar_grass_exclusion)
 
 lidar_status = lidar_figure.text(
     0.02,
@@ -1229,6 +1274,228 @@ def world_to_map(x, y):
 
     return map_x, map_y
 
+
+def update_main_lidar_overlay():
+    canvas.delete("lidar_overlay")
+    canvas.delete("goal_overlay")
+    canvas.delete("husky_goal_overlay")
+    canvas.delete("grass_exclusion_overlay")
+    canvas.delete("path_overlay")
+
+    if (
+        latest_lidar_scan is not None
+        and ugv_x is not None
+        and ugv_y is not None
+        and ugv_heading is not None
+    ):
+        ranges = np.asarray(latest_lidar_scan.ranges, dtype=np.float32)
+        angles = (
+            latest_lidar_scan.angle_min
+            + np.arange(len(ranges), dtype=np.float32)
+            * latest_lidar_scan.angle_increment
+        )
+        valid = (
+            np.isfinite(ranges)
+            & (ranges >= latest_lidar_scan.range_min)
+            & (
+                ranges
+                <= min(latest_lidar_scan.range_max, LIDAR_MAX_RANGE)
+            )
+        )
+        valid_indices = np.flatnonzero(valid)
+        if valid_indices.size > MAIN_LIDAR_MAX_POINTS:
+            valid_indices = valid_indices[::
+                int(np.ceil(valid_indices.size / MAIN_LIDAR_MAX_POINTS))
+            ]
+
+        cos_yaw = math.cos(ugv_heading)
+        sin_yaw = math.sin(ugv_heading)
+        for index in valid_indices:
+            local_x = float(ranges[index] * math.cos(angles[index]))
+            local_y = float(ranges[index] * math.sin(angles[index]))
+            world_x = ugv_x + cos_yaw * local_x - sin_yaw * local_y
+            world_y = ugv_y + sin_yaw * local_x + cos_yaw * local_y
+            map_x, map_y = world_to_map(world_x, world_y)
+            canvas.create_oval(
+                map_x - 2,
+                map_y - 2,
+                map_x + 2,
+                map_y + 2,
+                fill="#62a8d1",
+                outline="",
+                tags="lidar_overlay",
+            )
+
+    if latest_husky_goal is not None:
+        goal_x, goal_y = world_to_map(
+            latest_husky_goal[0],
+            latest_husky_goal[1],
+        )
+        canvas.create_polygon(
+            goal_x,
+            goal_y - 10,
+            goal_x + 10,
+            goal_y,
+            goal_x,
+            goal_y + 10,
+            goal_x - 10,
+            goal_y,
+            fill=RED,
+            outline=TEXT,
+            width=2,
+            tags="goal_overlay",
+        )
+        canvas.create_text(
+            goal_x,
+            goal_y + 18,
+            text="HUSKY GOAL",
+            fill=RED,
+            font=("DejaVu Sans Mono", 8, "bold"),
+            tags="goal_overlay",
+        )
+
+        if (
+            ugv_x is not None
+            and ugv_y is not None
+        ):
+            obstacle_points = np.empty((0, 2), dtype=np.float32)
+            if (
+                latest_lidar_scan is not None
+                and ugv_heading is not None
+            ):
+                ranges = np.asarray(
+                    latest_lidar_scan.ranges,
+                    dtype=np.float32,
+                )
+                angles = (
+                    latest_lidar_scan.angle_min
+                    + np.arange(len(ranges), dtype=np.float32)
+                    * latest_lidar_scan.angle_increment
+                )
+                valid = (
+                    np.isfinite(ranges)
+                    & (ranges >= latest_lidar_scan.range_min)
+                    & (
+                        ranges
+                        <= min(latest_lidar_scan.range_max, LIDAR_MAX_RANGE)
+                    )
+                )
+                if np.any(valid):
+                    local_x = ranges[valid] * np.cos(angles[valid])
+                    local_y = ranges[valid] * np.sin(angles[valid])
+                    cos_yaw = math.cos(ugv_heading)
+                    sin_yaw = math.sin(ugv_heading)
+                    obstacle_points = np.column_stack((
+                        ugv_x + cos_yaw * local_x - sin_yaw * local_y,
+                        ugv_y + sin_yaw * local_x + cos_yaw * local_y,
+                    )).astype(np.float32)
+            with camera_risk_lock:
+                active_grass_goal = (
+                    None
+                    if camera_risk_active_goal is None
+                    else camera_risk_active_goal.copy()
+                )
+            if (
+                active_grass_goal is not None
+                and math.hypot(
+                    latest_husky_goal[0] - active_grass_goal[0],
+                    latest_husky_goal[1] - active_grass_goal[1],
+                ) <= HUSKY_GRASS_EXCLUSION_RADIUS
+                and obstacle_points.size
+            ):
+                grass_goal = np.asarray(active_grass_goal[:2], dtype=np.float32)
+                obstacle_points = obstacle_points[
+                    np.linalg.norm(obstacle_points - grass_goal, axis=1)
+                    > HUSKY_GRASS_EXCLUSION_RADIUS
+                ]
+
+            path = plan_path(
+                ugv_x,
+                ugv_y,
+                np.asarray(latest_husky_goal, dtype=np.float32),
+                obstacle_points,
+            )
+            if path.size:
+                path_coordinates = []
+                for path_x, path_y in path:
+                    path_coordinates.extend(world_to_map(path_x, path_y))
+                canvas.create_line(
+                    *path_coordinates,
+                    fill="#58c98a",
+                    width=3,
+                    dash=(8, 4),
+                    tags="path_overlay",
+                )
+
+    with camera_risk_lock:
+        pending_goals = [goal.copy() for goal in camera_risk_pending_goals]
+        active_goal = (
+            None
+            if camera_risk_active_goal is None
+            else camera_risk_active_goal.copy()
+        )
+    if active_goal is not None:
+        exclusion_x, exclusion_y = world_to_map(
+            active_goal[0],
+            active_goal[1],
+        )
+        exclusion_radius = HUSKY_GRASS_EXCLUSION_RADIUS * MAP_SCALE
+        canvas.create_oval(
+            exclusion_x - exclusion_radius,
+            exclusion_y - exclusion_radius,
+            exclusion_x + exclusion_radius,
+            exclusion_y + exclusion_radius,
+            outline=AMBER,
+            dash=(6, 4),
+            width=2,
+            tags="grass_exclusion_overlay",
+        )
+        canvas.create_text(
+            exclusion_x,
+            exclusion_y + exclusion_radius + 12,
+            text=f"GRASS EXCLUSION {HUSKY_GRASS_EXCLUSION_RADIUS:.1f} m",
+            fill=AMBER,
+            font=("DejaVu Sans Mono", 8, "bold"),
+            tags="grass_exclusion_overlay",
+        )
+    for goal in pending_goals:
+        goal_x, goal_y = world_to_map(goal[0], goal[1])
+        canvas.create_oval(
+            goal_x - 5,
+            goal_y - 5,
+            goal_x + 5,
+            goal_y + 5,
+            fill=AMBER,
+            outline=TEXT,
+            tags="husky_goal_overlay",
+        )
+    if active_goal is not None:
+        goal_x, goal_y = world_to_map(active_goal[0], active_goal[1])
+        canvas.create_polygon(
+            goal_x,
+            goal_y - 9,
+            goal_x + 9,
+            goal_y,
+            goal_x,
+            goal_y + 9,
+            goal_x - 9,
+            goal_y,
+            fill=GREEN_BRIGHT,
+            outline=TEXT,
+            width=2,
+            tags="husky_goal_overlay",
+        )
+        canvas.create_text(
+            goal_x,
+            goal_y - 16,
+            text="ACTIVE GRASS",
+            fill=GREEN_BRIGHT,
+            font=("DejaVu Sans Mono", 8, "bold"),
+            tags="husky_goal_overlay",
+        )
+    root.after(MAIN_MAP_UPDATE_PERIOD_MS, update_main_lidar_overlay)
+
+
 # Hazards
 hazards = [
     (640, 190),
@@ -1417,6 +1684,7 @@ def clear_grass_pinpoints():
             grass_pinpoints.clear()
             camera_risk_pending_goals.clear()
             camera_risk_active_goal = None
+            camera_risk_completed_goals.clear()
     except OSError as error:
         pinpoint_status.config(text=f"Could not clear saved pins: {error}")
         add_log("GRASS", f"Could not clear saved pins: {error}")
@@ -1585,19 +1853,30 @@ def update_telemetry_ui():
 
     draw_grass_pinpoints()
 
+    root.after(100, update_telemetry_ui)
+
+
+def update_depth_heatmap():
     rendered_depth = False
     if latest_husky_depth is not None:
         try:
-            valid = np.isfinite(latest_husky_depth) & (latest_husky_depth > 0.0)
+            height, width = latest_husky_depth.shape
+            display_size = (
+                max(1, int(width * DEPTH_DISPLAY_SCALE)),
+                max(1, int(height * DEPTH_DISPLAY_SCALE)),
+            )
+            depth = cv2.resize(
+                latest_husky_depth,
+                display_size,
+                interpolation=cv2.INTER_NEAREST,
+            )
+            valid = np.isfinite(depth) & (depth > 0.0)
             if np.any(valid):
                 near = 0.4
                 far = 10.0
-                normalized_depth = np.zeros_like(
-                    latest_husky_depth,
-                    dtype=np.uint8,
-                )
+                normalized_depth = np.zeros_like(depth, dtype=np.uint8)
                 normalized_depth[valid] = np.clip(
-                    (far - latest_husky_depth[valid]) * 255.0 / (far - near),
+                    (far - depth[valid]) * 255.0 / (far - near),
                     0,
                     255,
                 ).astype(np.uint8)
@@ -1608,7 +1887,7 @@ def update_telemetry_ui():
                 heatmap[~valid] = (0, 0, 0)
                 heatmap = cv2.cvtColor(heatmap, cv2.COLOR_BGR2RGB)
                 depth_image = PILImage.fromarray(heatmap)
-                depth_image.thumbnail((1100, 650), PILImage.LANCZOS)
+                depth_image.thumbnail((1100, 650), PILImage.NEAREST)
                 depth_photo = ImageTk.PhotoImage(image=depth_image)
                 depth_camera_label.config(image=depth_photo, text="")
                 depth_camera_label.image = depth_photo
@@ -1620,8 +1899,7 @@ def update_telemetry_ui():
         depth_camera_label.config(text="DEPTH FEED WAITING")
     elif not rendered_depth:
         depth_camera_label.config(text="DEPTH DISPLAY ERROR")
-
-    root.after(100, update_telemetry_ui)
+    root.after(DEPTH_DISPLAY_PERIOD_MS, update_depth_heatmap)
 
 
 def update_lidar_ui():
@@ -1796,6 +2074,24 @@ def update_lidar_ui():
         # Goal + planned path
         # -------------------------
 
+        with camera_risk_lock:
+            active_grass_goal = (
+                None
+                if camera_risk_active_goal is None
+                else camera_risk_active_goal.copy()
+            )
+        if active_grass_goal is not None:
+            lidar_grass_exclusion.center = (
+                float(active_grass_goal[0]),
+                float(active_grass_goal[1]),
+            )
+            lidar_grass_exclusion.set_radius(
+                HUSKY_GRASS_EXCLUSION_RADIUS
+            )
+            lidar_grass_exclusion.set_visible(True)
+        else:
+            lidar_grass_exclusion.set_visible(False)
+
         if latest_husky_goal is not None:
             goal = np.asarray(
                 latest_husky_goal,
@@ -1811,11 +2107,25 @@ def update_lidar_ui():
                 ugv_x is not None
                 and ugv_y is not None
             ):
+                planning_points = world_points
+                if (
+                    active_grass_goal is not None
+                    and math.hypot(
+                        goal[0] - active_grass_goal[0],
+                        goal[1] - active_grass_goal[1],
+                    ) <= HUSKY_GRASS_EXCLUSION_RADIUS
+                ):
+                    planning_points = world_points[
+                        np.linalg.norm(
+                            world_points - np.asarray(active_grass_goal[:2]),
+                            axis=1,
+                        ) > HUSKY_GRASS_EXCLUSION_RADIUS
+                    ]
                 path = plan_path(
                     ugv_x,
                     ugv_y,
                     goal,
-                    world_points
+                    planning_points
                 )
 
                 if path.size:
@@ -1847,10 +2157,7 @@ def update_lidar_ui():
 
         lidar_canvas.draw_idle()
 
-    root.after(
-        100,
-        update_lidar_ui
-    )
+    root.after(MAIN_MAP_UPDATE_PERIOD_MS, update_lidar_ui)
 
 def draw_grass_pinpoints():
     if drone_odom_sample is None:
@@ -1876,6 +2183,7 @@ def draw_grass_pinpoints():
 
 def yolo_detection_worker():
     global camera_risk_active_goal, camera_risk_goal_published
+    global latest_husky_goal, camera_risk_completed_goals
     while not camera_risk_stop.is_set():
         camera_risk_wakeup.wait(0.2)
         camera_risk_wakeup.clear()
@@ -1891,7 +2199,18 @@ def yolo_detection_worker():
                     husky_position[1] - camera_risk_active_goal[1],
                 ) <= camera_risk_goal_tolerance
             ):
+                reached_goal = camera_risk_active_goal[:2]
+                camera_risk_completed_goals.append(reached_goal)
+                camera_risk_pending_goals[:] = [
+                    goal for goal in camera_risk_pending_goals
+                    if math.hypot(
+                        goal[0] - reached_goal[0],
+                        goal[1] - reached_goal[1],
+                    ) > camera_risk_duplicate_radius
+                ]
                 camera_risk_logs.put(("GOAL", "YOLO goal reached"))
+                if latest_husky_goal == tuple(camera_risk_active_goal[:2]):
+                    latest_husky_goal = None
                 camera_risk_active_goal = None
             if (
                 husky_dispatch_enabled
@@ -1916,9 +2235,12 @@ def update_camera_risk_ui():
     while not yolo_detection_queue.empty():
         point, frame_id, stamp = yolo_detection_queue.get_nowait()
         with camera_risk_lock:
-            known = [candidate[:2] for candidate in camera_risk_pending_goals]
+            known = [
+                candidate[:2] for candidate in camera_risk_pending_goals
+            ]
             if camera_risk_active_goal is not None:
                 known.append(camera_risk_active_goal[:2])
+            known.extend(camera_risk_completed_goals)
             if any(
                 np.linalg.norm(point[:2] - old_point)
                 < camera_risk_duplicate_radius
@@ -1973,6 +2295,8 @@ camera_risk_thread.start()
 
 update_telemetry_ui()
 update_lidar_ui()
+update_main_lidar_overlay()
+update_depth_heatmap()
 update_camera_risk_ui()
 
 root.mainloop()

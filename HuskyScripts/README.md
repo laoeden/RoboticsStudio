@@ -108,6 +108,13 @@ lidar returns into world coordinates and uses `grid_path_planner.plan_path` to
 select and replan paths around detected obstacles. Set
 `obstacle_stopping_enabled:=false` only when intentionally testing direct
 goal travel without obstacle handling.
+The default robot clearance is `0.45 m`; when no route is available from the
+current scan, the controller holds position and retries planning instead of
+cancelling the goal.
+Recent YOLO grass world positions are retained for `5.0` seconds. When the
+active goal matches a recent grass position, lidar returns within `0.8 m` of
+that grass position are excluded from A* planning, while the raw lidar
+front-collision safety check remains active.
 
 The wheel model uses deliberately high wheel friction (`mu1=100.0`,
 `mu2=100.0`) as a diagnostic. These values have little effect on the

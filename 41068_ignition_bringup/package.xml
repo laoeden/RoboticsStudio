@@ -13,6 +13,9 @@
   <depend>ros_ign_interfaces</depend>
   <depend>ros_ign_gazebo</depend>
   <depend>ros_ign_bridge</depend>
+  <build_depend>ignition-gazebo6</build_depend>
+  <build_depend>ignition-msgs8</build_depend>
+  <build_depend>ignition-transport11</build_depend>
   <depend>nav2_simple_commander</depend>
 
   <!-- Other -->
