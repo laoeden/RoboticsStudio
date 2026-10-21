@@ -1,38 +1,29 @@
 # FARMER User Interface
 
-Start the simulation and drone movement controller, then run from the repository root:
+Start the complete simulation, controllers, YOLO detector, and GUI with:
 
 ```bash
-source /opt/ros/humble/setup.bash
-source install/setup.bash
-python3 UI/farmer_ui.py
+./run_farmer.bash
 ```
 
-## Automatic dry-grass pinpoints
+## Topic dry-grass pinpoints
 
-Tune the CAMERA RISK colour controls until the dry-grass patches have detection
-boxes. With **Automatically pin dry grass** checked, fly the drone across the map.
-The GUI combines patch depth with the camera mounting transform and drone
-odometry to estimate the patch's position. Three repeated sightings confirm a
-pin; detections within one metre of a saved pin are merged.
+The GUI subscribes to `/parrot1/yolo/world_position` (`geometry_msgs/msg/PointStamped`).
+Every two seconds it processes the coordinates received since the previous refresh
+and adds amber `GRASS` markers to the MAIN map. The camera feed continues updating
+separately. Points must have a source frame and finite XYZ coordinates; detections
+within one metre of an existing pin in the same frame are merged.
 
-Amber `GRASS` markers and XY coordinates appear on the MAIN environment display.
-They remain at their recorded coordinates as the drone moves. Pins are saved in
-`UI/dry_grass_pinpoints.json` and loaded on the next GUI start. The file records
-XYZ and the drone odometry frame for future use. Keep the same world and coordinate
-origin when reusing a survey; move this file aside before starting a new survey.
+Pins stay in memory for the current GUI session. No JSON file is read or written,
+and restarting the GUI starts an empty map. Pins remain visible as the drone moves;
+a lack of new topic messages does not erase already surveyed locations.
 
-The status below the colour sliders shows the saved count or missing sensor data.
-Pinning requires RGB, depth, and drone odometry timestamps within 0.25 seconds.
-Turning off automatic pinning pauses recording and keeps existing pins.
+**Automatically pin dry grass** in CAMERA RISK pauses or resumes collection.
+**CLEAR PINPOINTS** clears session pins and queued coordinates and pauses collection;
+re-enable the checkbox to collect again.
 
-Pins represent colour-matched candidates, not confirmed grass classifications:
-the path or kangaroo can also produce a pin if they pass the colour filter.
-Positions are estimates using the current Parrot camera calibration and median
-patch depth. This feature records locations only; it does not send Husky goals.
-Before sending a recorded point later, transform it from its saved source frame
-to the Husky controller's coordinate frame.
-
-Use **CLEAR PINPOINTS** at the bottom right of MAIN to remove all grass markers,
-pending detections, and the saved coordinate file. Recording pauses after clearing;
-re-enable **Automatically pin dry grass** in CAMERA RISK to start a new survey.
+New pins also populate the Husky target queue. After the drone survey finishes,
+press **START HUSKY** to release queued targets. Repeated messages for a pin do not
+requeue it after arrival. The map displays pins matching the drone odometry frame.
+Husky goals use the existing shared odometry-origin assumption; deployments with
+different coordinate origins require a transform before sending targets.

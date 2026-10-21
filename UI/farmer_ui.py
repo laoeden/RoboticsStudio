@@ -68,8 +68,7 @@ latest_husky_depth = None
 depth_frame_count = 0
 drone_odom_sample = None
 odom_pin_samples = deque(maxlen=100)
-last_pinpoint_stamp = None
-grass_pinpoints = GrassPinpoints(REPO_ROOT / "UI" / "dry_grass_pinpoints.json")
+grass_pinpoints = GrassPinpoints()
 pinpoint_items = {}
 camera_risk_lock = threading.Lock()
 camera_risk_wakeup = threading.Event()
@@ -854,7 +853,7 @@ tk.Checkbutton(
     activeforeground=TEXT,
 ).pack(anchor="w", padx=15, pady=(8, 0))
 pinpoint_status = tk.Label(
-    camera_risk_controls, text=f"Saved grass pins: {len(grass_pinpoints.pins)}",
+    camera_risk_controls, text="Topic pins: 0 | Refresh: 2 s",
     bg=PANEL, fg=AMBER, wraplength=280, justify="left",
 )
 pinpoint_status.pack(anchor="w", padx=15, pady=5)
@@ -1678,25 +1677,21 @@ tk.Label(
 
 
 def clear_grass_pinpoints():
-    global last_pinpoint_stamp, camera_risk_active_goal
-    try:
-        with camera_risk_lock:
-            grass_pinpoints.clear()
-            camera_risk_pending_goals.clear()
-            camera_risk_active_goal = None
-            camera_risk_completed_goals.clear()
-    except OSError as error:
-        pinpoint_status.config(text=f"Could not clear saved pins: {error}")
-        add_log("GRASS", f"Could not clear saved pins: {error}")
-        return
+    global camera_risk_active_goal
     auto_pinpoints.set(False)
-    last_pinpoint_stamp = None
+    with camera_risk_lock:
+        grass_pinpoints.clear()
+        camera_risk_pending_goals.clear()
+        camera_risk_active_goal = None
+        camera_risk_completed_goals.clear()
+    while not yolo_detection_queue.empty():
+        yolo_detection_queue.get_nowait()
     for marker, label in pinpoint_items.values():
         canvas.delete(marker)
         canvas.delete(label)
     pinpoint_items.clear()
-    pinpoint_status.config(text="Pinning paused | Saved: 0")
-    add_log("GRASS", "Cleared all pinpoints and saved coordinates; pinning paused")
+    pinpoint_status.config(text="Pinning paused | Topic pins: 0")
+    add_log("GRASS", "Cleared session pinpoints and queued coordinates; pinning paused")
 
 
 tk.Button(
@@ -1851,7 +1846,6 @@ def update_telemetry_ui():
             map_x, map_y + 25
         )
 
-    draw_grass_pinpoints()
 
     root.after(100, update_telemetry_ui)
 
@@ -2230,38 +2224,6 @@ def yolo_detection_worker():
                     f"{camera_risk_active_goal[1]:.2f})",
                 ))
 def update_camera_risk_ui():
-    with camera_risk_lock:
-        pin_count = len(grass_pinpoints.pins)
-    while not yolo_detection_queue.empty():
-        point, frame_id, stamp = yolo_detection_queue.get_nowait()
-        with camera_risk_lock:
-            known = [
-                candidate[:2] for candidate in camera_risk_pending_goals
-            ]
-            if camera_risk_active_goal is not None:
-                known.append(camera_risk_active_goal[:2])
-            known.extend(camera_risk_completed_goals)
-            if any(
-                np.linalg.norm(point[:2] - old_point)
-                < camera_risk_duplicate_radius
-                for old_point in known
-            ):
-                continue
-            camera_risk_pending_goals.append(point)
-            if auto_pinpoints.get():
-                added = grass_pinpoints.observe(
-                    [point], frame_id, stamp
-                )
-            else:
-                added = []
-        for pin in added:
-            add_log(
-                "GRASS",
-                f"Pinned #{pin['id']} at "
-                f"({pin['x']:.2f}, {pin['y']:.2f})",
-            )
-        camera_risk_wakeup.set()
-
     while not camera_risk_logs.empty():
         source, message = camera_risk_logs.get_nowait()
         add_log(source, message)
@@ -2278,11 +2240,42 @@ def update_camera_risk_ui():
             image="",
             text="YOLO FEED WAITING FOR ANNOTATED IMAGE",
         )
-    if not auto_pinpoints.get():
-        pinpoint_status.config(text=f"Pinning paused | Saved: {pin_count}")
-    else:
-        pinpoint_status.config(text=f"Auto pinning | Saved grass pins: {pin_count}")
     root.after(100, update_camera_risk_ui)
+
+
+def update_topic_pinpoints():
+    """Consume all topic points received since the last two-second refresh."""
+    for _ in range(yolo_detection_queue.qsize()):
+        point, frame_id, stamp = yolo_detection_queue.get_nowait()
+        if not auto_pinpoints.get():
+            continue
+        with camera_risk_lock:
+            added = grass_pinpoints.observe([point], frame_id, stamp)
+            # Only new pins become goals: repeated topic messages must not
+            # send Husky back to a target it has already visited.
+            for pin in added:
+                known = [goal[:2] for goal in camera_risk_pending_goals]
+                known.extend(camera_risk_completed_goals)
+                if camera_risk_active_goal is not None:
+                    known.append(camera_risk_active_goal[:2])
+                if any(
+                    math.hypot(pin["x"] - goal[0], pin["y"] - goal[1])
+                    < camera_risk_duplicate_radius
+                    for goal in known
+                ):
+                    continue
+                camera_risk_pending_goals.append(
+                    np.array([pin["x"], pin["y"], pin["z"]])
+                )
+        for pin in added:
+            add_log("GRASS", f"Pinned #{pin['id']} at ({pin['x']:.2f}, {pin['y']:.2f})")
+        if added:
+            camera_risk_wakeup.set()
+    pin_count = len(grass_pinpoints.pins)
+    state = "Topic pinning" if auto_pinpoints.get() else "Pinning paused"
+    pinpoint_status.config(text=f"{state} | Pins: {pin_count} | Refresh: 2 s")
+    draw_grass_pinpoints()
+    root.after(2000, update_topic_pinpoints)
 
 
 camera_risk_thread = threading.Thread(
@@ -2298,5 +2291,6 @@ update_lidar_ui()
 update_main_lidar_overlay()
 update_depth_heatmap()
 update_camera_risk_ui()
+update_topic_pinpoints()
 
 root.mainloop()

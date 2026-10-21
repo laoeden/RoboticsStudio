@@ -1,7 +1,5 @@
-"""Confirm repeated grass sightings and persist positions in their source frame."""
-import json
+"""Track grass sightings in memory in their source coordinate frame."""
 import math
-from pathlib import Path
 
 
 def match_pin_samples(rgb_samples, depth_samples, odom_samples, tolerance=0.25):
@@ -18,27 +16,14 @@ def match_pin_samples(rgb_samples, depth_samples, odom_samples, tolerance=0.25):
 
 
 class GrassPinpoints:
-    def __init__(self, path, radius=1.0, confirmations=3):
-        self.path = Path(path)
+    def __init__(self, radius=1.0, confirmations=1):
         self.radius = radius
         self.confirmations = confirmations
         self.pins = []
         self.candidates = []
-        self.load_error = None
-        if self.path.exists():
-            try:
-                data = json.loads(self.path.read_text())
-                if data.get('version') != 1:
-                    raise ValueError('Unsupported pinpoint file version')
-                for pin in data['pins']:
-                    if not pin['frame_id'] or not all(math.isfinite(float(pin[k])) for k in ('x', 'y', 'z')):
-                        raise ValueError('Invalid pinpoint coordinates')
-                self.pins = data['pins']
-            except (ValueError, KeyError, TypeError, OSError) as error:
-                self.load_error = str(error)
 
     def observe(self, points, frame_id, timestamp):
-        if not frame_id or self.load_error:
+        if not frame_id:
             return []
         self.candidates = [c for c in self.candidates if 0 <= timestamp - c['last_seen'] <= 2.0]
         added = []
@@ -68,18 +53,9 @@ class GrassPinpoints:
                 self.pins.append(pin)
                 added.append(pin)
                 self.candidates.remove(candidate)
-        if added:
-            self.save()
         return added
 
     def clear(self):
-        """Remove the persisted survey before resetting in-memory detections."""
-        self.path.unlink(missing_ok=True)
+        """Reset the current session's detections without accessing disk."""
         self.pins.clear()
         self.candidates.clear()
-        self.load_error = None
-
-    def save(self):
-        temporary = self.path.with_suffix('.tmp')
-        temporary.write_text(json.dumps({'version': 1, 'pins': self.pins}, indent=2) + '\n')
-        temporary.replace(self.path)

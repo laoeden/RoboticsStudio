@@ -206,6 +206,134 @@
        <pose>12 12 0.634 0 0 0</pose>
        <static>true</static>
     </include>
+
+    <!-- Perimeter wedges: terrain spans XY [-25, 25] m.
+         Each wall is 50 m long, 4 m deep and 4 m high, with an inward-facing slope.
+         Polyline height is the extrusion length; roll turns the triangle upright. -->
+
+    <model name="boundary_wall_east">
+      <static>true</static>
+      <pose>21 25 0 1.57079632679 0 0</pose>
+      <link name="wall_link">
+        <collision name="collision">
+          <geometry>
+            <polyline>
+              <point>0 0</point>
+              <point>4 0</point>
+              <point>4 4</point>
+              <height>50</height>
+            </polyline>
+          </geometry>
+        </collision>
+        <visual name="visual">
+          <geometry>
+            <polyline>
+              <point>0 0</point>
+              <point>4 0</point>
+              <point>4 4</point>
+              <height>50</height>
+            </polyline>
+          </geometry>
+          <material>
+            <ambient>0.05 0.20 0.04 1</ambient>
+            <diffuse>0.05 0.20 0.04 1</diffuse>
+          </material>
+        </visual>
+      </link>
+    </model>
+
+    <model name="boundary_wall_north">
+      <static>true</static>
+      <pose>-25 21 0 1.57079632679 0 1.57079632679</pose>
+      <link name="wall_link">
+        <collision name="collision">
+          <geometry>
+            <polyline>
+              <point>0 0</point>
+              <point>4 0</point>
+              <point>4 4</point>
+              <height>50</height>
+            </polyline>
+          </geometry>
+        </collision>
+        <visual name="visual">
+          <geometry>
+            <polyline>
+              <point>0 0</point>
+              <point>4 0</point>
+              <point>4 4</point>
+              <height>50</height>
+            </polyline>
+          </geometry>
+          <material>
+            <ambient>0.05 0.20 0.04 1</ambient>
+            <diffuse>0.05 0.20 0.04 1</diffuse>
+          </material>
+        </visual>
+      </link>
+    </model>
+
+    <model name="boundary_wall_west">
+      <static>true</static>
+      <pose>-21 -25 0 1.57079632679 0 3.14159265359</pose>
+      <link name="wall_link">
+        <collision name="collision">
+          <geometry>
+            <polyline>
+              <point>0 0</point>
+              <point>4 0</point>
+              <point>4 4</point>
+              <height>50</height>
+            </polyline>
+          </geometry>
+        </collision>
+        <visual name="visual">
+          <geometry>
+            <polyline>
+              <point>0 0</point>
+              <point>4 0</point>
+              <point>4 4</point>
+              <height>50</height>
+            </polyline>
+          </geometry>
+          <material>
+            <ambient>0.05 0.20 0.04 1</ambient>
+            <diffuse>0.05 0.20 0.04 1</diffuse>
+          </material>
+        </visual>
+      </link>
+    </model>
+
+    <model name="boundary_wall_south">
+      <static>true</static>
+      <pose>25 -21 0 1.57079632679 0 -1.57079632679</pose>
+      <link name="wall_link">
+        <collision name="collision">
+          <geometry>
+            <polyline>
+              <point>0 0</point>
+              <point>4 0</point>
+              <point>4 4</point>
+              <height>50</height>
+            </polyline>
+          </geometry>
+        </collision>
+        <visual name="visual">
+          <geometry>
+            <polyline>
+              <point>0 0</point>
+              <point>4 0</point>
+              <point>4 4</point>
+              <height>50</height>
+            </polyline>
+          </geometry>
+          <material>
+            <ambient>0.05 0.20 0.04 1</ambient>
+            <diffuse>0.05 0.20 0.04 1</diffuse>
+          </material>
+        </visual>
+      </link>
+    </model>
   </world>
 </sdf>
 
