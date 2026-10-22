@@ -8,6 +8,10 @@ if str(REPO_ROOT) not in sys.path:
 from UI.grass_pinpoints import GrassPinpoints
 from collections import deque
 from HuskyScripts.grid_path_planner import plan_path
+from Mission.coverage_planner import CAMERA_DROP, Rect, SurveyConfig, footprint, plan_survey
+from Mission.survey_mission import (
+    MissionConfig, MissionIO, MissionState, SurveyMission, Telemetry,
+)
 
 import tkinter as tk
 from tkinter import ttk
@@ -15,6 +19,7 @@ from datetime import datetime
 import math
 import queue
 import threading
+import time
 
 import rclpy
 from rclpy.node import Node
@@ -29,6 +34,7 @@ from PIL import Image as PILImage, ImageTk
 
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+from matplotlib.patches import Circle
 
 from geometry_msgs.msg import PointStamped
 
@@ -63,6 +69,7 @@ rclpy.init()
 ros_node = Node("farmer_control_station")
 bridge = CvBridge()
 latest_yolo_image = None
+frame_stamps = deque(maxlen=60)   # stamps of Parrot camera frames not yet counted as survey coverage
 latest_husky_depth = None
 depth_frame_count = 0
 drone_odom_sample = None
@@ -79,9 +86,15 @@ husky_dispatch_enabled = False
 camera_risk_active_goal = None
 camera_risk_goal_published = 0
 camera_risk_goal_tolerance = 0.2
-camera_risk_duplicate_radius = 1.0
+camera_risk_duplicate_radius = 2.0
+camera_risk_completed_goals = []
 camera_risk_logs = queue.Queue()
 yolo_detection_queue = queue.Queue()
+MAIN_LIDAR_MAX_POINTS = 150
+MAIN_MAP_UPDATE_PERIOD_MS = 500
+DEPTH_DISPLAY_PERIOD_MS = 200
+DEPTH_DISPLAY_SCALE = 0.5
+HUSKY_GRASS_EXCLUSION_RADIUS = 3.5
 
 
 def message_time(msg):
@@ -103,6 +116,10 @@ spiral_active = False
 spiral_targets = []
 spiral_index = 0
 estop_active = False
+
+# Survey mission (see the SURVEY MISSION section below).
+survey_mode_active = False      # True while a survey owns the camera-risk pipeline
+mission_events = queue.Queue()  # ROS callbacks -> UI thread
 
 def odometry_callback(msg):
     global ugv_x, ugv_y, ugv_heading, camera_risk_husky_position
@@ -164,6 +181,33 @@ def husky_goal_callback(msg):
         float(msg.point.x),
         float(msg.point.y)
     )
+
+
+def husky_obstacle_stop_callback(msg):
+    global camera_risk_active_goal, latest_husky_goal
+    if not msg.data:
+        return
+    with camera_risk_lock:
+        blocked_goal = camera_risk_active_goal
+        camera_risk_active_goal = None
+    if blocked_goal is not None:
+        if latest_husky_goal == tuple(blocked_goal[:2]):
+            latest_husky_goal = None
+        camera_risk_logs.put((
+            "GOAL",
+            f"Skipped blocked Husky goal at "
+            f"({blocked_goal[0]:.2f}, {blocked_goal[1]:.2f}); "
+            "continuing with next goal.",
+        ))
+    camera_risk_wakeup.set()
+
+
+husky_obstacle_stop_sub = ros_node.create_subscription(
+        Bool,
+        "/husky1/obstacle_stop",
+        husky_obstacle_stop_callback,
+        10,
+)
 
 
 husky_goal_sub = ros_node.create_subscription(
@@ -270,11 +314,47 @@ def husky_depth_callback(msg):
         )
 
 
+def parrot_frame_callback(msg):
+    # Only the capture time is needed: the survey marks coverage from the drone pose at
+    # that moment, so the image itself is never decoded here (YOLO has its own copy).
+    frame_stamps.append(message_time(msg))
+
+
+parrot_frame_sub = ros_node.create_subscription(
+    RosImage,
+    "/parrot1/camera/image",
+    parrot_frame_callback,
+    10,
+)
+
+
 husky_depth_sub = ros_node.create_subscription(
     RosImage,
     "/husky1/camera/depth/image",
     husky_depth_callback,
     10,
+)
+
+def hazard_removed_callback(msg):
+    mission_events.put(("removed", float(msg.point.x), float(msg.point.y)))
+
+
+def husky_status_callback(msg):
+    mission_events.put(("status", msg.data))
+
+
+hazard_removed_sub = ros_node.create_subscription(
+    PointStamped,
+    "/hazard_removed",
+    hazard_removed_callback,
+    10
+)
+
+husky_status_sub = ros_node.create_subscription(
+    String,
+    "/husky1/goal_status",
+    husky_status_callback,
+    10
 )
 
 def ros_spin():
@@ -374,6 +454,10 @@ def add_log(source, message):
 def start_mission():
     global spiral_active, spiral_targets, spiral_index
 
+    if mission.active:
+        add_log("SYSTEM", "A survey is running; abort it before starting the spiral")
+        return
+
     pause_husky_dispatch()
     publish_command("STOP")
     publish_command("START")
@@ -418,6 +502,9 @@ def start_husky():
     global husky_dispatch_enabled
     if estop_active:
         return
+    if mission.active:
+        add_log("UGV", "A survey is running; abort it before starting the Husky")
+        return
     if spiral_active:
         add_log("UGV", "Wait for the drone survey to finish before starting Husky")
         return
@@ -438,6 +525,7 @@ def start_husky():
 def stop_mission():
     global spiral_active
 
+    mission.abort("operator stop")
     pause_husky_dispatch()
     publish_command("STOP")
     spiral_active = False
@@ -450,6 +538,7 @@ def stop_mission():
 def return_to_base():
     global spiral_active
 
+    mission.abort("return to base requested")
     pause_husky_dispatch()
     publish_command("RETURN_TO_BASE")
     spiral_active = False
@@ -484,6 +573,8 @@ def emergency_stop():
         pause_husky_dispatch()
         publish_command("EMERGENCY_STOP")
         spiral_active = False
+        set_draw_mode(False)
+        mission.abort("emergency stop", hover=False)
 
         for control in controls:
             control.config(state="disabled")
@@ -507,6 +598,538 @@ def emergency_stop():
         estop_button.config(text="[ EMERGENCY STOP ]")
 
         add_log("SYSTEM", "EMERGENCY STOP RESET")
+
+# =========================================================
+# SURVEY MISSION
+# Draw an area -> drone surveys it -> Husky investigates and
+# clears the POIs -> both return to base.
+# The logic lives in Mission/ (coverage_planner, survey_mission);
+# this section only connects it to ROS and the display.
+# =========================================================
+
+WORLD_HALF_EXTENT = 25.0          # the terrain mesh spans +/-25 m
+WORLD_RECT = Rect(
+    -WORLD_HALF_EXTENT, -WORLD_HALF_EXTENT,
+    WORLD_HALF_EXTENT, WORLD_HALF_EXTENT,
+)
+MIN_SURVEY_SIDE = 4.0             # smallest area that can be drawn (m)
+SURVEY_CFG = SurveyConfig()
+# Hover a little longer than the default after the sweep: YOLO inference on a software-rendered
+# simulation can lag the camera by a few seconds, and late sightings still need to become pins.
+MISSION_CFG = MissionConfig(survey=SURVEY_CFG, settle_time=6.0)
+
+POI_COLOURS = {
+    "pending": AMBER,
+    "active": "#5fb3d8",
+    "cleared": GREEN_BRIGHT,
+    "false_positive": TEXT_DIM,
+    "unreachable": RED,
+    "visited": GREEN,
+}
+POI_TAGS = {
+    "active": "VISITING",
+    "cleared": "CLEARED",
+    "false_positive": "FALSE POSITIVE",
+    "unreachable": "UNREACHABLE",
+    "visited": "VISITED",
+}
+
+survey_area = None                # Rect chosen on the map, or None
+survey_plan = None                # preview of the sweep for that area
+survey_drag = {"start": None}
+draw_mode_on = False
+square_lock = tk.BooleanVar(value=True)
+coverage_overlay = {"photo": None, "version": -1, "drawn_at": 0.0}
+last_mission_state = None
+
+map_view = {"ox": 405.0, "oy": 315.0, "scale": 10.0}
+
+
+def world_to_map(x, y):
+    """Convert ROS world coordinates (m) to environment display pixels."""
+    return (
+        map_view["ox"] + x * map_view["scale"],
+        map_view["oy"] - y * map_view["scale"],
+    )
+
+
+def map_to_world(px, py):
+    return (
+        (px - map_view["ox"]) / map_view["scale"],
+        (map_view["oy"] - py) / map_view["scale"],
+    )
+
+
+class UiMissionIO(MissionIO):
+    """Connects SurveyMission to the ROS publishers, pins and event log."""
+
+    def prepare_survey(self, area):
+        global survey_mode_active, camera_risk_active_goal, husky_dispatch_enabled
+        with camera_risk_lock:
+            # Earlier results in this area are re-detected by the new survey.
+            grass_pinpoints.discard_for_resurvey(area.bounds)
+            camera_risk_pending_goals.clear()
+            camera_risk_completed_goals.clear()
+            camera_risk_active_goal = None
+            husky_dispatch_enabled = False
+        survey_mode_active = True        # stop the camera tab dispatching the Husky
+        publish_command("CLEAR_GOAL")
+        auto_pinpoints.set(True)
+
+    def end_survey(self):
+        global survey_mode_active
+        survey_mode_active = False
+
+    def drone_goal(self, x, y, z):
+        publish_drone_goal(float(x), float(y), float(z))
+
+    def husky_goal(self, x, y):
+        publish_husky_goal(float(x), float(y))
+
+    def command(self, text):
+        publish_command(text)
+
+    def log(self, source, message):
+        add_log(source, message)
+
+    def list_pois(self, area):
+        with camera_risk_lock:
+            return [
+                {"id": pin["id"], "x": pin["x"], "y": pin["y"]}
+                for pin in grass_pinpoints.open_in(area.bounds)
+            ]
+
+    def mark_poi(self, poi_id, status):
+        with camera_risk_lock:
+            grass_pinpoints.set_status(poi_id, status)
+
+
+mission = SurveyMission(UiMissionIO(), MISSION_CFG)
+
+
+def mission_telemetry():
+    drone = None
+    if uav_x is not None and uav_y is not None and uav_z is not None:
+        drone = (uav_x, uav_y, uav_z)
+    husky = None
+    if ugv_x is not None and ugv_y is not None:
+        husky = (ugv_x, ugv_y)
+    try:
+        remover_online = ros_node.count_publishers("/hazard_removed") > 0
+    except Exception:       # ROS is shutting down (Ctrl+C): the window is about to close anyway
+        remover_online = False
+    return Telemetry(
+        drone=drone,
+        husky=husky,
+        battery=battery_level,
+        battery_low=battery_low_flag,
+        remover_online=remover_online,
+    )
+
+
+def format_duration(seconds):
+    minutes, secs = divmod(int(round(seconds)), 60)
+    return f"{minutes:02d}:{secs:02d}"
+
+
+# ---------- map drawing ----------
+
+def stack_map_layers():
+    """Static map at the bottom, then coverage, then the survey path."""
+    for tag in ("survey_overlay", "coverage_overlay", "map_static"):
+        try:
+            canvas.tag_lower(tag)
+        except tk.TclError:
+            pass
+
+
+def redraw_map_static():
+    canvas.delete("map_static")
+    half = WORLD_HALF_EXTENT
+    for i in range(-int(half), int(half) + 1, 5):
+        colour = "#2a3a28" if i == 0 else "#1b241a"
+        canvas.create_line(
+            *world_to_map(i, -half), *world_to_map(i, half),
+            fill=colour, tags="map_static",
+        )
+        canvas.create_line(
+            *world_to_map(-half, i), *world_to_map(half, i),
+            fill=colour, tags="map_static",
+        )
+        if i % 10 == 0 and i != 0:
+            canvas.create_text(
+                *world_to_map(i, -half - 1.6), text=f"{i}",
+                fill=TEXT_DIM, font=("DejaVu Sans Mono", 7), tags="map_static",
+            )
+            canvas.create_text(
+                *world_to_map(-half - 1.8, i), text=f"{i}",
+                fill=TEXT_DIM, font=("DejaVu Sans Mono", 7), tags="map_static",
+            )
+    canvas.create_rectangle(
+        *world_to_map(-half, half), *world_to_map(half, -half),
+        outline=GREEN, dash=(8, 5), width=2, tags="map_static",
+    )
+    # Charging pad / base at the origin (2 m x 2 m).
+    canvas.create_rectangle(
+        *world_to_map(-1, 1), *world_to_map(1, -1),
+        outline="#5fb3d8", width=2, tags="map_static",
+    )
+    canvas.create_text(
+        *world_to_map(0, 2.2), text="BASE",
+        fill="#5fb3d8", font=("DejaVu Sans Mono", 8), tags="map_static",
+    )
+    canvas.create_text(
+        15, 15, text="GRID REF: FIELD_A1", anchor="nw",
+        fill=TEXT_DIM, font=("DejaVu Sans Mono", 8), tags="map_static",
+    )
+    stack_map_layers()
+
+
+def on_map_resize(event):
+    if event.width < 100 or event.height < 100:
+        return
+    margin = 28
+    scale = min(event.width - 2 * margin, event.height - 2 * margin) / (
+        2 * WORLD_HALF_EXTENT
+    )
+    scale = max(scale, 1.0)
+    # Centred across, but pinned to the top: the MAIN tab can be taller than the
+    # window, and the map must stay in view without scrolling.
+    map_view.update(
+        ox=event.width / 2.0,
+        oy=margin + WORLD_HALF_EXTENT * scale,
+        scale=scale,
+    )
+    redraw_map_static()
+    draw_survey_overlay()
+    coverage_overlay["version"] = -1
+
+
+def current_plan():
+    """The mission's own plan once it has started, otherwise the preview."""
+    if mission.plan is not None and mission.area == survey_area:
+        return mission.plan
+    return survey_plan
+
+
+def draw_survey_overlay():
+    canvas.delete("survey_overlay")
+    area = survey_area
+    if area is None:
+        return
+    x0, y0 = world_to_map(area.xmin, area.ymax)
+    x1, y1 = world_to_map(area.xmax, area.ymin)
+    canvas.create_rectangle(
+        x0, y0, x1, y1, outline=AMBER, width=2, dash=(6, 3),
+        tags="survey_overlay",
+    )
+    canvas.create_text(
+        x0 + 4, y0 + 4, anchor="nw", fill=AMBER,
+        font=("DejaVu Sans Mono", 8, "bold"),
+        text=f"SURVEY AREA {area.width:.0f} x {area.height:.0f} m",
+        tags="survey_overlay",
+    )
+    plan = current_plan()
+    if plan is not None and plan.waypoints:
+        coords = []
+        for waypoint in plan.waypoints:
+            coords.extend(world_to_map(waypoint[0], waypoint[1]))
+        if len(coords) >= 4:
+            canvas.create_line(
+                *coords, fill=GREEN_BRIGHT, width=2, arrow=tk.LAST,
+                tags="survey_overlay",
+            )
+        for index, waypoint in enumerate(plan.waypoints):
+            x, y = world_to_map(waypoint[0], waypoint[1])
+            canvas.create_oval(
+                x - 3, y - 3, x + 3, y + 3, fill=GREEN_BRIGHT, outline="",
+                tags="survey_overlay",
+            )
+        x, y = world_to_map(plan.waypoints[0][0], plan.waypoints[0][1])
+        canvas.create_text(
+            x + 8, y - 8, text="START", fill=GREEN_BRIGHT,
+            font=("DejaVu Sans Mono", 7, "bold"), tags="survey_overlay",
+        )
+    stack_map_layers()
+
+
+def draw_survey_drag(rect):
+    canvas.delete("survey_drag")
+    x0, y0 = world_to_map(rect.xmin, rect.ymax)
+    x1, y1 = world_to_map(rect.xmax, rect.ymin)
+    canvas.create_rectangle(
+        x0, y0, x1, y1, outline="#5fb3d8", width=2, dash=(4, 3),
+        tags="survey_drag",
+    )
+    canvas.create_text(
+        x0 + 4, y0 + 4, anchor="nw", fill="#5fb3d8",
+        font=("DejaVu Sans Mono", 8, "bold"),
+        text=f"{rect.width:.1f} x {rect.height:.1f} m", tags="survey_drag",
+    )
+
+
+def draw_coverage_overlay():
+    """Tint the survey area: green where the camera has been, red where not."""
+    snapshot = mission.coverage_snapshot()
+    if snapshot is None or survey_area is None:
+        return
+    version, seen, area = snapshot
+    if area != survey_area:
+        return
+    now = time.monotonic()
+    if version == coverage_overlay["version"]:
+        return
+    if now - coverage_overlay["drawn_at"] < 0.5:
+        return
+    coverage_overlay["version"] = version
+    coverage_overlay["drawn_at"] = now
+    x0, y0 = world_to_map(area.xmin, area.ymax)
+    x1, y1 = world_to_map(area.xmax, area.ymin)
+    width = max(1, int(round(x1 - x0)))
+    height = max(1, int(round(y1 - y0)))
+    rgba = np.zeros(seen.shape + (4,), dtype=np.uint8)
+    rgba[seen] = (143, 191, 99, 90)
+    rgba[~seen] = (216, 92, 80, 45)
+    image = PILImage.fromarray(rgba).resize((width, height), PILImage.NEAREST)
+    photo = ImageTk.PhotoImage(image)
+    canvas.delete("coverage_overlay")
+    canvas.create_image(
+        x0, y0, anchor="nw", image=photo, tags="coverage_overlay"
+    )
+    coverage_overlay["photo"] = photo     # keep a reference or Tk drops the image
+    stack_map_layers()
+
+
+# ---------- drawing the area ----------
+
+def set_draw_mode(enabled):
+    global draw_mode_on
+    draw_mode_on = enabled
+    draw_area_button.config(
+        text="[ CANCEL DRAWING ]" if enabled else "[ DRAW AREA ]"
+    )
+    canvas.config(cursor="crosshair" if enabled else "")
+    survey_drag["start"] = None
+    canvas.delete("survey_drag")
+    if enabled:
+        survey_status_label.config(
+            text="Drag on the environment display to draw the survey area."
+        )
+
+
+def toggle_draw_mode():
+    if mission.active or estop_active:
+        return
+    set_draw_mode(not draw_mode_on)
+
+
+def drag_rect(event):
+    """Rectangle from the press point to the pointer, optionally forced square."""
+    start_x, start_y = survey_drag["start"]
+    half = WORLD_HALF_EXTENT
+    end_x, end_y = map_to_world(event.x, event.y)
+    end_x = min(max(end_x, -half), half)
+    end_y = min(max(end_y, -half), half)
+    if square_lock.get():
+        dx, dy = end_x - start_x, end_y - start_y
+        side = max(abs(dx), abs(dy))
+        sign_x = 1.0 if dx >= 0 else -1.0
+        sign_y = 1.0 if dy >= 0 else -1.0
+        room_x = (half - start_x) if sign_x > 0 else (start_x + half)
+        room_y = (half - start_y) if sign_y > 0 else (start_y + half)
+        side = min(side, room_x, room_y)
+        end_x, end_y = start_x + sign_x * side, start_y + sign_y * side
+    return Rect.from_corners(start_x, start_y, end_x, end_y)
+
+
+def on_area_press(event):
+    if not draw_mode_on or mission.active:
+        return
+    x, y = map_to_world(event.x, event.y)
+    if not WORLD_RECT.contains(x, y):
+        return
+    survey_drag["start"] = (x, y)
+
+
+def on_area_drag(event):
+    if survey_drag["start"] is None:
+        return
+    draw_survey_drag(drag_rect(event))
+
+
+def on_area_release(event):
+    if survey_drag["start"] is None:
+        return
+    rect = drag_rect(event)
+    canvas.delete("survey_drag")
+    survey_drag["start"] = None
+    if rect.width < MIN_SURVEY_SIDE or rect.height < MIN_SURVEY_SIDE:
+        survey_status_label.config(
+            text=f"Area too small: each side must be at least {MIN_SURVEY_SIDE:.0f} m."
+        )
+        return
+    set_survey_area(rect)
+    set_draw_mode(False)
+
+
+def set_survey_area(rect):
+    global survey_area, survey_plan
+    survey_area = rect
+    start = None
+    if uav_x is not None and uav_y is not None:
+        start = (uav_x, uav_y)
+    survey_plan = plan_survey(rect, SURVEY_CFG, start)
+    coverage_overlay["version"] = -1
+    canvas.delete("coverage_overlay")
+    draw_survey_overlay()
+    plan = survey_plan
+    add_log(
+        "SURVEY",
+        f"Area {rect.width:.0f} x {rect.height:.0f} m selected: {plan.rows} rows, "
+        f"{len(plan.waypoints)} waypoints, altitude {plan.flight_z:.1f} m, "
+        f"ETA {format_duration(plan.eta_s)}",
+    )
+    for warning in plan.warnings:
+        add_log("SURVEY", f"WARNING: {warning}")
+    survey_status_label.config(
+        text="Area ready. Press SURVEY + INVESTIGATE to start."
+    )
+
+
+def clear_survey_area():
+    global survey_area, survey_plan
+    if mission.active:
+        return
+    survey_area = None
+    survey_plan = None
+    set_draw_mode(False)
+    canvas.delete("survey_overlay")
+    canvas.delete("coverage_overlay")
+    coverage_overlay["version"] = -1
+    survey_status_label.config(text="Draw an area on the map to begin.")
+    add_log("SURVEY", "Survey area cleared")
+
+
+# ---------- starting and stopping ----------
+
+def start_survey():
+    if estop_active:
+        add_log("SURVEY", "Cannot start: emergency stop is active")
+        return
+    if mission.active:
+        return
+    if survey_area is None:
+        add_log("SURVEY", "Draw a survey area first")
+        return
+    if spiral_active:
+        add_log("SURVEY", "Stop the spiral mission before starting a survey")
+        return
+    if uav_x is None or uav_y is None or uav_z is None:
+        add_log("SURVEY", "Waiting for drone odometry")
+        return
+    husky = (ugv_x, ugv_y) if ugv_x is not None and ugv_y is not None else None
+    set_draw_mode(False)
+    if mission.start(survey_area, time.monotonic(), (uav_x, uav_y, uav_z), husky):
+        coverage_overlay["version"] = -1
+        draw_survey_overlay()
+        refresh_survey_labels()
+
+
+def abort_survey():
+    mission.abort("operator abort")
+
+
+# ---------- keeping the display up to date ----------
+
+def refresh_survey_labels():
+    plan = current_plan() if survey_area is not None else None
+    if survey_area is None or plan is None:
+        area_label.config(text="NONE")
+        eta_label.config(text="--:--")
+        waypoints_label.config(text="--")
+        return
+    area_label.config(text=f"{survey_area.width:.0f}x{survey_area.height:.0f} m")
+    eta_label.config(text=format_duration(plan.eta_s))
+    waypoints_label.config(text=str(len(plan.waypoints)))
+
+
+def refresh_survey_ui():
+    global last_mission_state
+    status = mission.status()
+    state = status["state"]
+    active = mission.active
+    blocked = estop_active
+    idle_ok = not active and not blocked
+    draw_area_button.config(state="normal" if idle_ok else "disabled")
+    clear_area_button.config(
+        state="normal" if idle_ok and survey_area is not None else "disabled"
+    )
+    survey_start_button.config(
+        state="normal" if idle_ok and survey_area is not None else "disabled"
+    )
+    survey_abort_button.config(state="normal" if active else "disabled")
+
+    if state != last_mission_state:
+        last_mission_state = state
+        if not estop_active:
+            if active:
+                status_value.config(text="SURVEY", fg=GREEN_BRIGHT)
+            elif state == MissionState.COMPLETE:
+                status_value.config(text="READY", fg=GREEN_BRIGHT)
+            elif state == MissionState.ABORTED:
+                status_value.config(text="HALTED", fg=RED)
+        if state != MissionState.IDLE:
+            mission_value.config(text=state.value)
+        draw_survey_overlay()
+        refresh_survey_labels()
+
+    progress_label.config(text=f"{status['progress'] * 100:.0f}%")
+    if status["pois_found"]:
+        hazards_label.config(
+            text=f"{status['pois_cleared']}/{status['pois_total']}"
+        )
+    elif state == MissionState.IDLE:
+        hazards_label.config(text="--")
+    mode_label.config(text="SURVEY/INVESTIGATE" if active else "STANDBY")
+
+    if state != MissionState.IDLE:
+        lines = [state.value]
+        if state in (MissionState.TAKEOFF, MissionState.SWEEP,
+                     MissionState.GAP_FILL, MissionState.SETTLE):
+            lines.append(
+                f"Seen {status['coverage'] * 100:.0f}% | waypoint "
+                f"{min(status['waypoint'] + 1, max(status['waypoints'], 1))}"
+                f"/{status['waypoints']}"
+            )
+        elif status["pois_found"]:
+            lines.append(
+                f"POIs: {status['pois_cleared']} cleared, "
+                f"{status['pois_false']} false, "
+                f"{status['pois_unreachable']} unreachable, "
+                f"{status['pois_open']} to go"
+            )
+        if status["reason"]:
+            lines.append(status["reason"])
+        survey_status_label.config(text="\n".join(lines))
+
+    if active or state != MissionState.IDLE:
+        draw_coverage_overlay()
+
+
+def service_mission():
+    """Run once per UI tick: feed ROS events to the mission and step it."""
+    while True:
+        try:
+            event = mission_events.get_nowait()
+        except queue.Empty:
+            break
+        if event[0] == "removed":
+            mission.on_hazard_removed(event[1], event[2])
+        else:
+            mission.on_husky_status(event[1])
+    mission.update(time.monotonic(), mission_telemetry())
+    refresh_survey_ui()
+
 
 # =========================================================
 # HEADER
@@ -726,6 +1349,18 @@ lidar_robot_heading, = lidar_map_axis.plot(
     color="black",
     linewidth=2
 )
+
+lidar_grass_exclusion = Circle(
+    (0.0, 0.0),
+    HUSKY_GRASS_EXCLUSION_RADIUS,
+    fill=False,
+    edgecolor="#d3aa55",
+    linestyle="--",
+    linewidth=2,
+    label="Grass exclusion",
+    visible=False,
+)
+lidar_map_axis.add_patch(lidar_grass_exclusion)
 
 lidar_status = lidar_figure.text(
     0.02,
@@ -971,8 +1606,8 @@ def info_row(parent, label, value):
 
 
 battery_label = info_row(left, "BATTERY", "-- %")
-info_row(left, "PROGRESS", "0%")
-info_row(left, "HAZARDS", "0%")
+progress_label = info_row(left, "PROGRESS", "0%")
+hazards_label = info_row(left, "HAZARDS", "--")
 info_row(left, "LOCALISATION", "FIXED")
 info_row(left, "LINK", "GOOD")
 
@@ -1031,6 +1666,41 @@ start_husky_button = tactical_button("[ START HUSKY M]", start_husky, GREEN_BRIG
 stop_button = tactical_button("[ STOP ]", stop_mission, AMBER)
 rtb_button = tactical_button("[ RETURN TO BASE ]", return_to_base)
 estop_button = tactical_button("[ EMERGENCY STOP ]", emergency_stop, RED)
+
+tk.Frame(left, bg=BORDER, height=1).pack(fill="x", padx=12, pady=(10, 6))
+
+tk.Label(
+    left,
+    text="SURVEY AREA",
+    bg=PANEL,
+    fg=GREEN_BRIGHT,
+    font=("DejaVu Sans Mono", 10, "bold")
+).pack(anchor="w", padx=15)
+
+draw_area_button = tactical_button("[ DRAW AREA ]", toggle_draw_mode, GREEN_BRIGHT)
+
+tk.Checkbutton(
+    left, text="Lock to square", variable=square_lock,
+    bg=PANEL, fg=TEXT, selectcolor=PANEL_2, activebackground=PANEL,
+    activeforeground=TEXT,
+).pack(anchor="w", padx=15)
+
+clear_area_button = tactical_button("[ CLEAR AREA ]", clear_survey_area)
+survey_start_button = tactical_button(
+    "[ SURVEY + INVESTIGATE ]", start_survey, GREEN_BRIGHT
+)
+survey_abort_button = tactical_button("[ ABORT SURVEY ]", abort_survey, AMBER)
+
+survey_status_label = tk.Label(
+    left,
+    text="Draw an area on the map to begin.",
+    bg=PANEL,
+    fg=TEXT_DIM,
+    wraplength=220,
+    justify="left",
+    font=("DejaVu Sans Mono", 8)
+)
+survey_status_label.pack(anchor="w", padx=15, pady=(2, 10))
 
 drone_target_frame = tk.Frame(left, bg=PANEL)
 drone_target_frame.pack(fill="x", padx=15, pady=10)
@@ -1154,36 +1824,14 @@ depth_camera_label = tk.Label(
 depth_camera_label.pack(fill="both", expand=True, padx=8, pady=(0, 8))
 
 
-# Grid
-for x in range(0, 1000, 40):
-    canvas.create_line(
-        x, 0, x, 700,
-        fill="#1b241a",
-        tags="map_feature"
-    )
+# Static map layers (grid, world boundary, base) are drawn in world coordinates
+# by redraw_map_static() and redrawn whenever the canvas is resized.
+canvas.bind("<Configure>", on_map_resize)
+canvas.bind("<ButtonPress-1>", on_area_press)
+canvas.bind("<B1-Motion>", on_area_drag)
+canvas.bind("<ButtonRelease-1>", on_area_release)
+redraw_map_static()
 
-for y in range(0, 700, 40):
-    canvas.create_line(
-        0, y, 1000, y,
-        fill="#1b241a",
-        tags="map_feature"
-    )
-
-
-# Mission boundary
-canvas.create_polygon(
-    120, 120,
-    540, 90,
-    760, 220,
-    680, 500,
-    220, 520,
-    90, 340,
-    outline=GREEN,
-    fill="",
-    width=2,
-    dash=(8, 5),
-    tags="map_feature"
-)
 
 # UGV
 ugv_marker = canvas.create_oval(
@@ -1218,53 +1866,8 @@ uav_marker_label = canvas.create_text(
     font=("DejaVu Sans Mono", 9)
 )
 
-# Convert ROS world coordinates to environment display coordinates
-MAP_ORIGIN_X = 405
-MAP_ORIGIN_Y = 315
-MAP_SCALE = 25
-
-def world_to_map(x, y):
-    map_x = MAP_ORIGIN_X + (x * MAP_SCALE)
-    map_y = MAP_ORIGIN_Y - (y * MAP_SCALE)
-
-    return map_x, map_y
-
-# Hazards
-hazards = [
-    (640, 190),
-    (700, 320),
-    (470, 420)
-]
-
-for hx, hy in hazards:
-    canvas.create_polygon(
-        hx, hy - 12,
-        hx - 10, hy + 10,
-        hx + 10, hy + 10,
-        fill=RED,
-        outline="",
-        tags="map_feature"
-    )
-
-    canvas.create_text(
-        hx,
-        hy + 2,
-        text="!",
-        fill="white",
-        font=("DejaVu Sans Mono", 9, "bold"),
-        tags="map_feature"
-    )
-
-
-canvas.create_text(
-    15,
-    15,
-    text='GRID REF: FIELD_A1',
-    anchor="nw",
-    fill=TEXT_DIM,
-    font=("DejaVu Sans Mono", 8),
-    tags="map_feature"
-)
+# Camera footprint of the Parrot (smallest case: over the highest terrain).
+uav_fov_item = canvas.create_rectangle(0, 0, 0, 0, outline="#5fb3d8", dash=(3, 3))
 
 
 # =========================================================
@@ -1335,19 +1938,21 @@ def right_info(label, value):
         font=("DejaVu Sans Mono", 9)
     ).pack(side="left")
 
-    tk.Label(
+    value_label = tk.Label(
         frame,
         text=value,
         bg=PANEL,
         fg=TEXT,
         font=("DejaVu Sans Mono", 9, "bold")
-    ).pack(side="right")
+    )
+    value_label.pack(side="right")
+    return value_label
 
 
-right_info("AREA", "FIELD_A1")
-right_info("MODE", "SURVEY/MOW")
-right_info("ETA", "01:20:00")
-right_info("WAYPOINTS", "24")
+area_label = right_info("AREA", "NONE")
+mode_label = right_info("MODE", "STANDBY")
+eta_label = right_info("ETA", "--:--")
+waypoints_label = right_info("WAYPOINTS", "--")
 
 
 tk.Frame(right, bg=BORDER, height=1).pack(
@@ -1412,11 +2017,15 @@ tk.Label(
 
 def clear_grass_pinpoints():
     global last_pinpoint_stamp, camera_risk_active_goal
+    if mission.active:
+        add_log("GRASS", "Cannot clear pinpoints while a survey is running")
+        return
     try:
         with camera_risk_lock:
             grass_pinpoints.clear()
             camera_risk_pending_goals.clear()
             camera_risk_active_goal = None
+            camera_risk_completed_goals.clear()
     except OSError as error:
         pinpoint_status.config(text=f"Could not clear saved pins: {error}")
         add_log("GRASS", f"Could not clear saved pins: {error}")
@@ -1508,7 +2117,7 @@ def advance_spiral():
         spiral_active = False
         add_log("UAV", "SPIRAL COMPLETE")
         mission_value.config(text="SURVEY COMPLETE")
-        add_log("UGV", "Coordinates collected — press START HUSKY when ready")
+        add_log("UGV", "Coordinates collected  press START HUSKY when ready")
         return
 
     spiral_index += 1
@@ -1520,6 +2129,7 @@ def get_synced_uav_position():
 
 def update_telemetry_ui():
     advance_spiral()
+    service_mission()
 
     display_uav_x, display_uav_y, display_uav_z = get_synced_uav_position()
 
@@ -1583,21 +2193,265 @@ def update_telemetry_ui():
             map_x, map_y + 25
         )
 
+        if display_uav_z is not None:
+            # Ground footprint of the downward camera (smallest case).
+            agl = max(display_uav_z - CAMERA_DROP - SURVEY_CFG.terrain_max, 0.5)
+            span_x, span_y = footprint(agl)
+            half_w = span_x / 2.0 * map_view["scale"]
+            half_h = span_y / 2.0 * map_view["scale"]
+            canvas.coords(
+                uav_fov_item,
+                map_x - half_w, map_y - half_h,
+                map_x + half_w, map_y + half_h
+            )
+
     draw_grass_pinpoints()
 
+    root.after(100, update_telemetry_ui)
+
+
+def update_main_lidar_overlay():
+    canvas.delete("lidar_overlay")
+    canvas.delete("goal_overlay")
+    canvas.delete("husky_goal_overlay")
+    canvas.delete("grass_exclusion_overlay")
+    canvas.delete("path_overlay")
+
+    if (
+        latest_lidar_scan is not None
+        and ugv_x is not None
+        and ugv_y is not None
+        and ugv_heading is not None
+    ):
+        ranges = np.asarray(latest_lidar_scan.ranges, dtype=np.float32)
+        angles = (
+            latest_lidar_scan.angle_min
+            + np.arange(len(ranges), dtype=np.float32)
+            * latest_lidar_scan.angle_increment
+        )
+        valid = (
+            np.isfinite(ranges)
+            & (ranges >= latest_lidar_scan.range_min)
+            & (
+                ranges
+                <= min(latest_lidar_scan.range_max, LIDAR_MAX_RANGE)
+            )
+        )
+        valid_indices = np.flatnonzero(valid)
+        if valid_indices.size > MAIN_LIDAR_MAX_POINTS:
+            valid_indices = valid_indices[::
+                int(np.ceil(valid_indices.size / MAIN_LIDAR_MAX_POINTS))
+            ]
+
+        cos_yaw = math.cos(ugv_heading)
+        sin_yaw = math.sin(ugv_heading)
+        for index in valid_indices:
+            local_x = float(ranges[index] * math.cos(angles[index]))
+            local_y = float(ranges[index] * math.sin(angles[index]))
+            world_x = ugv_x + cos_yaw * local_x - sin_yaw * local_y
+            world_y = ugv_y + sin_yaw * local_x + cos_yaw * local_y
+            map_x, map_y = world_to_map(world_x, world_y)
+            canvas.create_oval(
+                map_x - 2,
+                map_y - 2,
+                map_x + 2,
+                map_y + 2,
+                fill="#62a8d1",
+                outline="",
+                tags="lidar_overlay",
+            )
+
+    if latest_husky_goal is not None:
+        goal_x, goal_y = world_to_map(
+            latest_husky_goal[0],
+            latest_husky_goal[1],
+        )
+        canvas.create_polygon(
+            goal_x,
+            goal_y - 10,
+            goal_x + 10,
+            goal_y,
+            goal_x,
+            goal_y + 10,
+            goal_x - 10,
+            goal_y,
+            fill=RED,
+            outline=TEXT,
+            width=2,
+            tags="goal_overlay",
+        )
+        canvas.create_text(
+            goal_x,
+            goal_y + 18,
+            text="HUSKY GOAL",
+            fill=RED,
+            font=("DejaVu Sans Mono", 8, "bold"),
+            tags="goal_overlay",
+        )
+
+        if (
+            ugv_x is not None
+            and ugv_y is not None
+        ):
+            obstacle_points = np.empty((0, 2), dtype=np.float32)
+            if (
+                latest_lidar_scan is not None
+                and ugv_heading is not None
+            ):
+                ranges = np.asarray(
+                    latest_lidar_scan.ranges,
+                    dtype=np.float32,
+                )
+                angles = (
+                    latest_lidar_scan.angle_min
+                    + np.arange(len(ranges), dtype=np.float32)
+                    * latest_lidar_scan.angle_increment
+                )
+                valid = (
+                    np.isfinite(ranges)
+                    & (ranges >= latest_lidar_scan.range_min)
+                    & (
+                        ranges
+                        <= min(latest_lidar_scan.range_max, LIDAR_MAX_RANGE)
+                    )
+                )
+                if np.any(valid):
+                    local_x = ranges[valid] * np.cos(angles[valid])
+                    local_y = ranges[valid] * np.sin(angles[valid])
+                    cos_yaw = math.cos(ugv_heading)
+                    sin_yaw = math.sin(ugv_heading)
+                    obstacle_points = np.column_stack((
+                        ugv_x + cos_yaw * local_x - sin_yaw * local_y,
+                        ugv_y + sin_yaw * local_x + cos_yaw * local_y,
+                    )).astype(np.float32)
+            with camera_risk_lock:
+                active_grass_goal = (
+                    None
+                    if camera_risk_active_goal is None
+                    else camera_risk_active_goal.copy()
+                )
+            if (
+                active_grass_goal is not None
+                and math.hypot(
+                    latest_husky_goal[0] - active_grass_goal[0],
+                    latest_husky_goal[1] - active_grass_goal[1],
+                ) <= HUSKY_GRASS_EXCLUSION_RADIUS
+                and obstacle_points.size
+            ):
+                grass_goal = np.asarray(active_grass_goal[:2], dtype=np.float32)
+                obstacle_points = obstacle_points[
+                    np.linalg.norm(obstacle_points - grass_goal, axis=1)
+                    > HUSKY_GRASS_EXCLUSION_RADIUS
+                ]
+
+            path = plan_path(
+                ugv_x,
+                ugv_y,
+                np.asarray(latest_husky_goal, dtype=np.float32),
+                obstacle_points,
+            )
+            if path.size:
+                path_coordinates = []
+                for path_x, path_y in path:
+                    path_coordinates.extend(world_to_map(path_x, path_y))
+                canvas.create_line(
+                    *path_coordinates,
+                    fill="#58c98a",
+                    width=3,
+                    dash=(8, 4),
+                    tags="path_overlay",
+                )
+
+    with camera_risk_lock:
+        pending_goals = [goal.copy() for goal in camera_risk_pending_goals]
+        active_goal = (
+            None
+            if camera_risk_active_goal is None
+            else camera_risk_active_goal.copy()
+        )
+    if active_goal is not None:
+        exclusion_x, exclusion_y = world_to_map(
+            active_goal[0],
+            active_goal[1],
+        )
+        exclusion_radius = HUSKY_GRASS_EXCLUSION_RADIUS * map_view["scale"]
+        canvas.create_oval(
+            exclusion_x - exclusion_radius,
+            exclusion_y - exclusion_radius,
+            exclusion_x + exclusion_radius,
+            exclusion_y + exclusion_radius,
+            outline=AMBER,
+            dash=(6, 4),
+            width=2,
+            tags="grass_exclusion_overlay",
+        )
+        canvas.create_text(
+            exclusion_x,
+            exclusion_y + exclusion_radius + 12,
+            text=f"GRASS EXCLUSION {HUSKY_GRASS_EXCLUSION_RADIUS:.1f} m",
+            fill=AMBER,
+            font=("DejaVu Sans Mono", 8, "bold"),
+            tags="grass_exclusion_overlay",
+        )
+    for goal in pending_goals:
+        goal_x, goal_y = world_to_map(goal[0], goal[1])
+        canvas.create_oval(
+            goal_x - 5,
+            goal_y - 5,
+            goal_x + 5,
+            goal_y + 5,
+            fill=AMBER,
+            outline=TEXT,
+            tags="husky_goal_overlay",
+        )
+    if active_goal is not None:
+        goal_x, goal_y = world_to_map(active_goal[0], active_goal[1])
+        canvas.create_polygon(
+            goal_x,
+            goal_y - 9,
+            goal_x + 9,
+            goal_y,
+            goal_x,
+            goal_y + 9,
+            goal_x - 9,
+            goal_y,
+            fill=GREEN_BRIGHT,
+            outline=TEXT,
+            width=2,
+            tags="husky_goal_overlay",
+        )
+        canvas.create_text(
+            goal_x,
+            goal_y - 16,
+            text="ACTIVE GRASS",
+            fill=GREEN_BRIGHT,
+            font=("DejaVu Sans Mono", 8, "bold"),
+            tags="husky_goal_overlay",
+        )
+    root.after(MAIN_MAP_UPDATE_PERIOD_MS, update_main_lidar_overlay)
+
+
+def update_depth_heatmap():
     rendered_depth = False
     if latest_husky_depth is not None:
         try:
-            valid = np.isfinite(latest_husky_depth) & (latest_husky_depth > 0.0)
+            height, width = latest_husky_depth.shape
+            display_size = (
+                max(1, int(width * DEPTH_DISPLAY_SCALE)),
+                max(1, int(height * DEPTH_DISPLAY_SCALE)),
+            )
+            depth = cv2.resize(
+                latest_husky_depth,
+                display_size,
+                interpolation=cv2.INTER_NEAREST,
+            )
+            valid = np.isfinite(depth) & (depth > 0.0)
             if np.any(valid):
                 near = 0.4
                 far = 10.0
-                normalized_depth = np.zeros_like(
-                    latest_husky_depth,
-                    dtype=np.uint8,
-                )
+                normalized_depth = np.zeros_like(depth, dtype=np.uint8)
                 normalized_depth[valid] = np.clip(
-                    (far - latest_husky_depth[valid]) * 255.0 / (far - near),
+                    (far - depth[valid]) * 255.0 / (far - near),
                     0,
                     255,
                 ).astype(np.uint8)
@@ -1608,7 +2462,7 @@ def update_telemetry_ui():
                 heatmap[~valid] = (0, 0, 0)
                 heatmap = cv2.cvtColor(heatmap, cv2.COLOR_BGR2RGB)
                 depth_image = PILImage.fromarray(heatmap)
-                depth_image.thumbnail((1100, 650), PILImage.LANCZOS)
+                depth_image.thumbnail((1100, 650), PILImage.NEAREST)
                 depth_photo = ImageTk.PhotoImage(image=depth_image)
                 depth_camera_label.config(image=depth_photo, text="")
                 depth_camera_label.image = depth_photo
@@ -1620,8 +2474,7 @@ def update_telemetry_ui():
         depth_camera_label.config(text="DEPTH FEED WAITING")
     elif not rendered_depth:
         depth_camera_label.config(text="DEPTH DISPLAY ERROR")
-
-    root.after(100, update_telemetry_ui)
+    root.after(DEPTH_DISPLAY_PERIOD_MS, update_depth_heatmap)
 
 
 def update_lidar_ui():
@@ -1796,6 +2649,24 @@ def update_lidar_ui():
         # Goal + planned path
         # -------------------------
 
+        with camera_risk_lock:
+            active_grass_goal = (
+                None
+                if camera_risk_active_goal is None
+                else camera_risk_active_goal.copy()
+            )
+        if active_grass_goal is not None:
+            lidar_grass_exclusion.center = (
+                float(active_grass_goal[0]),
+                float(active_grass_goal[1]),
+            )
+            lidar_grass_exclusion.set_radius(
+                HUSKY_GRASS_EXCLUSION_RADIUS
+            )
+            lidar_grass_exclusion.set_visible(True)
+        else:
+            lidar_grass_exclusion.set_visible(False)
+
         if latest_husky_goal is not None:
             goal = np.asarray(
                 latest_husky_goal,
@@ -1811,11 +2682,25 @@ def update_lidar_ui():
                 ugv_x is not None
                 and ugv_y is not None
             ):
+                planning_points = world_points
+                if (
+                    active_grass_goal is not None
+                    and math.hypot(
+                        goal[0] - active_grass_goal[0],
+                        goal[1] - active_grass_goal[1],
+                    ) <= HUSKY_GRASS_EXCLUSION_RADIUS
+                ):
+                    planning_points = world_points[
+                        np.linalg.norm(
+                            world_points - np.asarray(active_grass_goal[:2]),
+                            axis=1,
+                        ) > HUSKY_GRASS_EXCLUSION_RADIUS
+                    ]
                 path = plan_path(
                     ugv_x,
                     ugv_y,
                     goal,
-                    world_points
+                    planning_points
                 )
 
                 if path.size:
@@ -1847,28 +2732,36 @@ def update_lidar_ui():
 
         lidar_canvas.draw_idle()
 
-    root.after(
-        100,
-        update_lidar_ui
-    )
+    root.after(MAIN_MAP_UPDATE_PERIOD_MS, update_lidar_ui)
 
 def draw_grass_pinpoints():
     if drone_odom_sample is None:
         return
     frame = drone_odom_sample[0].header.frame_id
     with camera_risk_lock:
-        pins = list(grass_pinpoints.pins)
+        pins = [dict(pin) for pin in grass_pinpoints.pins]
+    live = {pin["id"] for pin in pins}
+    for pin_id in [i for i in pinpoint_items if i not in live]:
+        marker, label = pinpoint_items.pop(pin_id)
+        canvas.delete(marker)
+        canvas.delete(label)
     for pin in pins:
         if pin["frame_id"] != frame:
             continue
+        status = pin.get("status", "pending")
+        colour = POI_COLOURS.get(status, AMBER)
+        text = f"GRASS {pin['id']}\n({pin['x']:.1f}, {pin['y']:.1f})"
+        if status in POI_TAGS:
+            text += f"\n{POI_TAGS[status]}"
         if pin["id"] not in pinpoint_items:
-            marker = canvas.create_oval(0, 0, 0, 0, fill=AMBER, outline=TEXT, width=2)
+            marker = canvas.create_oval(0, 0, 0, 0, fill=colour, outline=TEXT, width=2)
             label = canvas.create_text(
-                0, 0, fill=AMBER, font=("DejaVu Sans Mono", 9),
-                text=f"GRASS {pin['id']}\n({pin['x']:.1f}, {pin['y']:.1f})",
+                0, 0, fill=colour, font=("DejaVu Sans Mono", 9), text=text,
             )
             pinpoint_items[pin["id"]] = marker, label
         marker, label = pinpoint_items[pin["id"]]
+        canvas.itemconfigure(marker, fill=colour)
+        canvas.itemconfigure(label, fill=colour, text=text)
         x, y = world_to_map(pin["x"], pin["y"])
         canvas.coords(marker, x - 6, y - 6, x + 6, y + 6)
         canvas.coords(label, x, y + 24)
@@ -1876,6 +2769,7 @@ def draw_grass_pinpoints():
 
 def yolo_detection_worker():
     global camera_risk_active_goal, camera_risk_goal_published
+    global latest_husky_goal, camera_risk_completed_goals
     while not camera_risk_stop.is_set():
         camera_risk_wakeup.wait(0.2)
         camera_risk_wakeup.clear()
@@ -1891,7 +2785,18 @@ def yolo_detection_worker():
                     husky_position[1] - camera_risk_active_goal[1],
                 ) <= camera_risk_goal_tolerance
             ):
+                reached_goal = camera_risk_active_goal[:2]
+                camera_risk_completed_goals.append(reached_goal)
+                camera_risk_pending_goals[:] = [
+                    goal for goal in camera_risk_pending_goals
+                    if math.hypot(
+                        goal[0] - reached_goal[0],
+                        goal[1] - reached_goal[1],
+                    ) > camera_risk_duplicate_radius
+                ]
                 camera_risk_logs.put(("GOAL", "YOLO goal reached"))
+                if latest_husky_goal == tuple(camera_risk_active_goal[:2]):
+                    latest_husky_goal = None
                 camera_risk_active_goal = None
             if (
                 husky_dispatch_enabled
@@ -1910,28 +2815,53 @@ def yolo_detection_worker():
                     f"({camera_risk_active_goal[0]:.2f}, "
                     f"{camera_risk_active_goal[1]:.2f})",
                 ))
+
+
+def mark_survey_coverage():
+    """Tell the survey what each new camera frame saw, using the drone pose at that time."""
+    while frame_stamps:
+        stamp = frame_stamps.popleft()
+        samples = list(odom_pin_samples)
+        if not samples:
+            continue
+        message, sample_stamp = min(samples, key=lambda sample: abs(sample[1] - stamp))
+        if abs(sample_stamp - stamp) > 0.25:
+            continue
+        pose = message.pose.pose
+        q = pose.orientation
+        mission.observe_frame(
+            float(pose.position.x), float(pose.position.y), float(pose.position.z),
+            math.atan2(
+                2.0 * (q.w * q.z + q.x * q.y),
+                1.0 - 2.0 * (q.y * q.y + q.z * q.z),
+            ),
+        )
+
+
 def update_camera_risk_ui():
-    with camera_risk_lock:
-        pin_count = len(grass_pinpoints.pins)
+    mark_survey_coverage()
     while not yolo_detection_queue.empty():
         point, frame_id, stamp = yolo_detection_queue.get_nowait()
+        if not frame_id and drone_odom_sample is not None:
+            frame_id = drone_odom_sample[0].header.frame_id
         with camera_risk_lock:
-            known = [candidate[:2] for candidate in camera_risk_pending_goals]
-            if camera_risk_active_goal is not None:
-                known.append(camera_risk_active_goal[:2])
-            if any(
-                np.linalg.norm(point[:2] - old_point)
-                < camera_risk_duplicate_radius
-                for old_point in known
-            ):
-                continue
-            camera_risk_pending_goals.append(point)
+            # Every sighting counts towards confirming a pin.
             if auto_pinpoints.get():
-                added = grass_pinpoints.observe(
-                    [point], frame_id, stamp
-                )
+                added = grass_pinpoints.observe([point], frame_id, stamp)
             else:
                 added = []
+            # Outside a survey a new detection is queued for START HUSKY; during a
+            # survey the mission decides when the Husky moves.
+            if not survey_mode_active:
+                known = [candidate[:2] for candidate in camera_risk_pending_goals]
+                if camera_risk_active_goal is not None:
+                    known.append(camera_risk_active_goal[:2])
+                known.extend(camera_risk_completed_goals)
+                if not any(
+                    np.linalg.norm(point[:2] - old_point) < camera_risk_duplicate_radius
+                    for old_point in known
+                ):
+                    camera_risk_pending_goals.append(point)
         for pin in added:
             add_log(
                 "GRASS",
@@ -1940,6 +2870,8 @@ def update_camera_risk_ui():
             )
         camera_risk_wakeup.set()
 
+    with camera_risk_lock:
+        pin_count = len(grass_pinpoints.pins)
     while not camera_risk_logs.empty():
         source, message = camera_risk_logs.get_nowait()
         add_log(source, message)
@@ -1973,6 +2905,8 @@ camera_risk_thread.start()
 
 update_telemetry_ui()
 update_lidar_ui()
+update_main_lidar_overlay()
+update_depth_heatmap()
 update_camera_risk_ui()
 
 root.mainloop()

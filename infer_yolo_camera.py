@@ -3,6 +3,8 @@
 
 import argparse
 import math
+import threading
+from collections import deque
 
 import cv2
 import numpy as np
@@ -21,6 +23,37 @@ CX = 360.0
 CY = 240.0
 MIN_DEPTH_M = 0.4
 MAX_DEPTH_M = 10.0
+# How far from the image's timestamp the paired depth frame / odometry may be. Odometry
+# decides where the drone was, so it must be close; depth only gives the range to the
+# ground, which barely changes over half a second.
+DEPTH_TOLERANCE_S = 0.5
+ODOM_TOLERANCE_S = 0.15
+# How long (in message time) depth and odometry are kept for pairing. Images are paired the
+# moment they arrive, so a few seconds is plenty; the frame cap bounds memory (about 1.4 MB each).
+DEPTH_HISTORY_S = 3.0
+ODOM_HISTORY_S = 5.0
+MAX_DEPTH_FRAMES = 40
+
+
+def stamp_seconds(header) -> float:
+    return header.stamp.sec + header.stamp.nanosec * 1e-9
+
+
+def nearest_sample(samples, stamp: float, tolerance: float):
+    """Return the (stamp, value) closest in time to `stamp`, or None if none is within tolerance."""
+    best = min(samples, key=lambda sample: abs(sample[0] - stamp), default=None)
+    if best is None or abs(best[0] - stamp) > tolerance:
+        return None
+    return best
+
+
+def remember(buffer: deque, stamp: float, value, history: float, limit: int = 100000) -> None:
+    """Append a sample, dropping those older than `history` (or all, if the clock restarted)."""
+    if buffer and stamp < buffer[-1][0] - 1.0:
+        buffer.clear()          # simulation restarted: old samples belong to another timeline
+    buffer.append((stamp, value))
+    while buffer and (stamp - buffer[0][0] > history or len(buffer) > limit):
+        buffer.popleft()
 
 
 def camera_to_base(point: np.ndarray) -> np.ndarray:
@@ -131,8 +164,21 @@ class CameraInference(Node):
         self.model = YOLO(model_path)
         self.bridge = CvBridge()
         self.confidence = confidence
-        self.latest_depth: np.ndarray | None = None
-        self.latest_odom: Odometry | None = None
+        # Recent depth frames and odometry, so each image is paired with the depth and
+        # drone pose from the moment it was captured: the drone keeps moving, and at
+        # 2 m/s every 0.25 s of mismatch is 0.5 m of position error.
+        self.depth_buffer: deque = deque()
+        self.odom_buffer: deque = deque()
+        # YOLO runs on its own thread. On a CPU one frame can take seconds; run inside the
+        # ROS callback it would stop this node from receiving odometry and depth meanwhile,
+        # and the samples belonging to the image would be gone by the time it finished.
+        self._pending = None            # newest (image, depth, odometry); older frames are dropped
+        self._wake = threading.Condition()
+        self._stopping = False
+        self._worker = threading.Thread(
+            target=self._inference_loop, daemon=True, name="YOLO_INFERENCE"
+        )
+        self._worker.start()
         self.world_position_publisher = self.create_publisher(
             PointStamped,
             "/parrot1/yolo/world_position",
@@ -152,22 +198,70 @@ class CameraInference(Node):
         )
 
     def callback(self, message: Image) -> None:
+        """Pair the image with depth and odometry right away, then hand it to the YOLO thread."""
+        stamp = stamp_seconds(message.header)
+        depth_sample = nearest_sample(self.depth_buffer, stamp, DEPTH_TOLERANCE_S)
+        odom_sample = nearest_sample(self.odom_buffer, stamp, ODOM_TOLERANCE_S)
+        if depth_sample is None or odom_sample is None:
+            def gap(buffer):
+                return (
+                    "none received" if not buffer
+                    else f"closest {min(abs(s - stamp) for s, _ in buffer):.2f} s away"
+                )
+            # Still show the annotated image, but publish no world positions: a position
+            # from mismatched samples is wrong by the distance the drone moved meanwhile.
+            self.get_logger().warn(
+                f"No synced depth/odometry for the image at {stamp:.2f}: "
+                f"depth {gap(self.depth_buffer)}, odometry {gap(self.odom_buffer)}.",
+                throttle_duration_sec=5.0,
+            )
+        job = (
+            message,
+            None if depth_sample is None else depth_sample[1],
+            None if odom_sample is None else odom_sample[1],
+        )
+        with self._wake:
+            self._pending = job
+            self._wake.notify()
+
+    def _inference_loop(self) -> None:
+        while True:
+            with self._wake:
+                while self._pending is None and not self._stopping:
+                    self._wake.wait()
+                if self._stopping:
+                    return
+                job, self._pending = self._pending, None
+            try:
+                self.process(*job)
+            except Exception as error:  # keep the thread alive whatever one frame does
+                self.get_logger().error(f"YOLO inference failed: {error}", throttle_duration_sec=2.0)
+
+    def shutdown_worker(self) -> None:
+        with self._wake:
+            self._stopping = True
+            self._wake.notify()
+        self._worker.join(timeout=2.0)
+
+    def process(self, message: Image, depth, odometry) -> None:
         image = self.bridge.imgmsg_to_cv2(message, desired_encoding="bgr8")
         result = self.model.predict(image, conf=self.confidence, verbose=False)[0]
         display = result.plot()
-        if self.latest_depth is not None and self.latest_odom is not None:
+        if depth is not None and odometry is not None:
             for box in result.boxes.xyxy.cpu().numpy():
                 camera_point = depth_at_detection(
-                    self.latest_depth,
+                    depth,
                     tuple(float(value) for value in box),
                 )
                 if camera_point is None:
                     label = "world: depth unavailable"
                 else:
-                    point = world_position(camera_point, self.latest_odom)
+                    point = world_position(camera_point, odometry)
                     label = f"world: ({point[0]:.2f}, {point[1]:.2f}, {point[2]:.2f}) m"
                     world_message = PointStamped()
-                    world_message.header = self.latest_odom.header
+                    # Frame of the odometry, time of the image the detection came from.
+                    world_message.header.frame_id = odometry.header.frame_id
+                    world_message.header.stamp = message.header.stamp
                     world_message.point.x = float(point[0])
                     world_message.point.y = float(point[1])
                     world_message.point.z = float(point[2])
@@ -188,12 +282,15 @@ class CameraInference(Node):
 
     def depth_callback(self, message: Image) -> None:
         try:
-            self.latest_depth = self._depth_from_message(message)
+            remember(
+                self.depth_buffer, stamp_seconds(message.header),
+                self._depth_from_message(message), DEPTH_HISTORY_S, MAX_DEPTH_FRAMES,
+            )
         except ValueError as error:
             self.get_logger().error(str(error), throttle_duration_sec=2.0)
 
     def odom_callback(self, message: Odometry) -> None:
-        self.latest_odom = message
+        remember(self.odom_buffer, stamp_seconds(message.header), message, ODOM_HISTORY_S)
 
     def _depth_from_message(self, message: Image) -> np.ndarray:
         if message.encoding not in ("32FC1", "16UC1"):
@@ -241,6 +338,7 @@ def main() -> int:
     except KeyboardInterrupt:
         pass
     finally:
+        node.shutdown_worker()
         node.destroy_node()
         if rclpy.ok():
             rclpy.shutdown()

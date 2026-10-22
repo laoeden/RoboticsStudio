@@ -49,11 +49,11 @@ class HuskyMotion(Node):
     def __init__(self) -> None:
         super().__init__('husky_motion', namespace='husky1')
         defaults = {
-            'linear_gain': 0.8,
+            'linear_gain': 1.0,
             'max_speed': 1.5,
-            'angular_gain': 2.0,
+            'angular_gain': 1.0,
             'max_angular_speed': 1.0,
-            'min_turn_speed': 0.8,
+            'min_turn_speed': 1.0,
             'heading_tolerance': 0.15,
             'position_tolerance': 0.2,
             'odom_timeout': 5.0,
@@ -74,11 +74,13 @@ class HuskyMotion(Node):
             'max_stuck_recoveries': 2,
             'obstacle_stopping_enabled': True,
             'progress_stopping_enabled': False,
-            'obstacle_distance': 1.5,
+            'obstacle_distance': 2.0,
             'front_angle': math.pi / 4.0,
             'planning_range': 5.0,
             'path_resolution': 0.2,
-            'robot_clearance': 2.0,
+            'robot_clearance': 0.45,
+            'grass_exclusion_radius': 3.5,
+            'grass_detection_timeout': 120.0,
             # Lidar hits this close to the charging pad are ignored: the pad and its
             # marker are part of the dock, not obstacles to avoid.
             'dock_clear_radius': 1.6,
@@ -140,6 +142,7 @@ class HuskyMotion(Node):
         self.last_return_attempt = 0.0
         self.low_return_started = False
         self.scan_obstacle_points = np.empty((0, 2), dtype=np.float32)
+        self.grass_locations: list[tuple[float, float, float]] = []
         self.scan_received = False
         self.path = np.empty((0, 2), dtype=np.float32)
         self.path_index = 0
@@ -150,6 +153,8 @@ class HuskyMotion(Node):
             'obstacle_stop',
             10,
         )
+        # 'EVENT x y detail' for every goal outcome: ARRIVED, DOCKED, CANCELLED, REJECTED.
+        self.status_publisher = self.create_publisher(String, 'goal_status', 10)
         self.create_subscription(
             Odometry,
             'odometry',
@@ -163,6 +168,12 @@ class HuskyMotion(Node):
             qos_profile_sensor_data,
         )
         self.create_subscription(PointStamped, 'goal', self.on_goal, 10)
+        self.create_subscription(
+            PointStamped,
+            '/parrot1/yolo/world_position',
+            self.on_grass_detection,
+            10,
+        )
         # Absolute topic: the UI publishes mission commands for every robot.
         self.create_subscription(String, '/mission_command', self.on_mission_command, 10)
         self.create_subscription(Bool, 'battery_low', self.on_battery_low, 10)
@@ -184,6 +195,71 @@ class HuskyMotion(Node):
             clock=Clock(clock_type=ClockType.STEADY_TIME),
         )
         self.get_logger().info('Ready: waiting for odometry and a goal.')
+
+    def on_grass_detection(self, message: PointStamped) -> None:
+        if not all(math.isfinite(value) for value in (
+            message.point.x,
+            message.point.y,
+        )):
+            return
+        now = time.monotonic()
+        self.grass_locations = [
+            location for location in self.grass_locations
+            if now - location[2] <= self.grass_detection_timeout
+        ]
+        point = (float(message.point.x), float(message.point.y), now)
+        for index, location in enumerate(self.grass_locations):
+            if math.hypot(point[0] - location[0], point[1] - location[1]) <= 0.3:
+                self.grass_locations[index] = point
+                break
+        else:
+            self.grass_locations.append(point)
+
+    def _planning_obstacles(self, points: np.ndarray) -> np.ndarray:
+        grass_targets = self._grass_targets_for_goal()
+        if grass_targets.size == 0:
+            return points
+        distances = np.linalg.norm(
+            points[:, None, :] - grass_targets[None, :, :],
+            axis=2,
+        )
+        return points[np.all(distances > self.grass_exclusion_radius, axis=1)]
+
+    def _grass_targets_for_goal(self) -> np.ndarray:
+        if self.goal is None or not self.grass_locations:
+            return np.empty((0, 2), dtype=np.float32)
+        now = time.monotonic()
+        self.grass_locations = [
+            location for location in self.grass_locations
+            if now - location[2] <= self.grass_detection_timeout
+        ]
+        goal = np.array([
+            self.goal.point.x,
+            self.goal.point.y,
+        ], dtype=np.float32)
+        return np.asarray([
+            location[:2] for location in self.grass_locations
+            if np.linalg.norm(np.asarray(location[:2]) - goal)
+            <= self.grass_exclusion_radius
+        ], dtype=np.float32)
+
+    def _grass_lidar_hit(self, distance: float, angle: float) -> bool:
+        grass_targets = self._grass_targets_for_goal()
+        if (
+            grass_targets.size == 0
+            or self.odom is None
+            or not math.isfinite(distance)
+        ):
+            return False
+        position = self.odom.pose.pose.position
+        hit = np.array([
+            position.x + distance * math.cos(angle + self.odom_heading),
+            position.y + distance * math.sin(angle + self.odom_heading),
+        ], dtype=np.float32)
+        return bool(np.any(
+            np.linalg.norm(grass_targets - hit, axis=1)
+            <= self.grass_exclusion_radius
+        ))
 
     def on_scan(self, message: LaserScan) -> None:
         ranges = np.asarray(message.ranges, dtype=np.float32)
@@ -219,10 +295,11 @@ class HuskyMotion(Node):
             local_y = ranges[valid] * np.sin(angles[valid])
             cos_yaw = math.cos(yaw)
             sin_yaw = math.sin(yaw)
-            self.scan_obstacle_points = np.column_stack((
+            scan_points = np.column_stack((
                 position.x + cos_yaw * local_x - sin_yaw * local_y,
                 position.y + sin_yaw * local_x + cos_yaw * local_y,
             )).astype(np.float32)
+            self.scan_obstacle_points = self._planning_obstacles(scan_points)
             self.scan_received = True
         elif self.odom is not None and np.any(finite):
             # Everything the lidar sees is part of the dock: no obstacles at all.
@@ -242,6 +319,7 @@ class HuskyMotion(Node):
                 abs(angle) <= self.front_angle
                 and math.isfinite(distance)
                 and message.range_min <= distance <= message.range_max
+                and not self._grass_lidar_hit(distance, angle)
             ):
                 front_ranges.append(distance)
 
@@ -279,6 +357,14 @@ class HuskyMotion(Node):
                         'replanned path.'
                     )
                 return
+            self.get_logger().warn(
+                'No collision-free path found around the current obstacle; '
+                'holding position and retrying with the next lidar scan.',
+                throttle_duration_sec=2.0,
+            )
+            self.path_replan_requested = True
+            self.stop()
+            return
         if not self.obstacle_stopping_enabled:
             self.get_logger().warn(
                 f'Obstacle stopping disabled; continuing past lidar return '
@@ -287,6 +373,7 @@ class HuskyMotion(Node):
             )
             return
         self.obstacle_detected = True
+        self.publish_status('CANCELLED', 'obstacle ahead')
         self.goal = None
         self.stop()
         event = Bool()
@@ -388,6 +475,7 @@ class HuskyMotion(Node):
 
     def on_mission_command(self, message: String) -> None:
         if message.data in ('CLEAR_GOAL', 'DELETE_GOAL'):
+            self.publish_status('CANCELLED', 'cleared by command')
             self.goal = None
             self.path = np.empty((0, 2), dtype=np.float32)
             self.path_index = 0
@@ -396,6 +484,7 @@ class HuskyMotion(Node):
             self.get_logger().info('Active goal cleared.')
         elif message.data == 'EMERGENCY_STOP':
             self.estop_active = True
+            self.publish_status('CANCELLED', 'emergency stop')
             self.goal = None
             self.stop()
             self.get_logger().warn('EMERGENCY STOP ACTIVE')
@@ -409,6 +498,7 @@ class HuskyMotion(Node):
 
         elif message.data == 'STOP':
             self.return_wanted = False
+            self.publish_status('CANCELLED', 'stop command')
             self.goal = None
             self.stop()
 
@@ -441,11 +531,14 @@ class HuskyMotion(Node):
         self.on_goal(goal, from_return=True)
 
     def on_goal(self, message: PointStamped, from_return: bool = False) -> None:
+        goal_xy = (message.point.x, message.point.y)
         if self.estop_active:
             self.get_logger().warn('Rejected goal: emergency stop is active.')
+            self.publish_status('REJECTED', 'emergency stop is active', goal_xy)
             return
         if self.return_wanted and not from_return:
             self.get_logger().warn('Rejected goal: returning to charging station.')
+            self.publish_status('REJECTED', 'returning to charging station', goal_xy)
             return
 
         if not all(math.isfinite(value) for value in (message.point.x, message.point.y)):
@@ -456,12 +549,14 @@ class HuskyMotion(Node):
             or time.monotonic() - self.odom_received > self.odom_timeout
         ):
             self.get_logger().error('Rejected goal: waiting for fresh odometry.')
+            self.publish_status('REJECTED', 'no fresh odometry', goal_xy)
             return
         if not matching_frame(message.header.frame_id, self.odom.header.frame_id):
             self.get_logger().error(
                 f'Goal frame {message.header.frame_id!r} does not match '
                 f'odometry frame {self.odom.header.frame_id!r}.'
             )
+            self.publish_status('REJECTED', 'wrong frame', goal_xy)
             return
         duplicate_goal = (
             self.goal is not None
@@ -491,6 +586,19 @@ class HuskyMotion(Node):
             f'Moving to XY ({message.point.x}, {message.point.y}); Z ignored.'
         )
 
+    def publish_status(self, event: str, detail: str = '', xy=None) -> None:
+        """Report a goal outcome as 'EVENT x y detail' on goal_status."""
+        if xy is None:
+            if self.goal is None:
+                return
+            xy = (self.goal.point.x, self.goal.point.y)
+        x, y = float(xy[0]), float(xy[1])
+        if not (math.isfinite(x) and math.isfinite(y)):
+            return
+        status = String()
+        status.data = f'{event} {x:.3f} {y:.3f} {detail}'.strip()
+        self.status_publisher.publish(status)
+
     def stop(self) -> None:
         self.publisher.publish(Twist())
         self.last_command_linear = 0.0
@@ -507,6 +615,7 @@ class HuskyMotion(Node):
             )
             if to_dock <= self.position_tolerance:
                 self.get_logger().info('Docked at charging station.')
+                self.publish_status('DOCKED', xy=(self.dock_x, self.dock_y))
                 self.return_wanted = False
             elif time.monotonic() - self.last_return_attempt >= 3.0:
                 self.get_logger().warn(
@@ -536,8 +645,10 @@ class HuskyMotion(Node):
         distance = float(np.linalg.norm(goal - world_position))
         if distance <= self.position_tolerance:
             self.get_logger().info(f'Arrived: {distance:.3f} m from target.')
+            self.publish_status('ARRIVED')
             if self.return_wanted:
                 self.get_logger().info('Docked at charging station.')
+                self.publish_status('DOCKED')
                 self.return_wanted = False
             self.goal = None
             self.stop()
@@ -570,6 +681,7 @@ class HuskyMotion(Node):
                     'Husky did not make progress after recovery attempts; '
                     'cancelling the active goal.'
                 )
+                self.publish_status('CANCELLED', 'no progress after recovery attempts')
                 self.goal = None
                 self.stop()
                 return
@@ -614,10 +726,12 @@ class HuskyMotion(Node):
             self.path_replan_requested = False
             if not self.path.size:
                 self.get_logger().error(
-                    'No collision-free path to goal; movement cancelled.'
+                    'No collision-free path to goal in current lidar data; '
+                    'holding position and waiting to replan.',
+                    throttle_duration_sec=2.0,
                 )
-                self.goal = None
                 self.stop()
+                self.path_replan_requested = True
                 return
 
         while self.path_index < len(self.path) - 1:
@@ -673,4 +787,4 @@ def main() -> None:
 
 
 if __name__ == '__main__':
-    main()
+    main() 

@@ -17,6 +17,12 @@ def match_pin_samples(rgb_samples, depth_samples, odom_samples, tolerance=0.25):
     return None
 
 
+PENDING = 'pending'
+ACTIVE = 'active'
+OPEN_STATUSES = (PENDING, ACTIVE)
+STATUSES = (PENDING, ACTIVE, 'cleared', 'false_positive', 'unreachable', 'visited')
+
+
 class GrassPinpoints:
     def __init__(self, path, radius=1.0, confirmations=3):
         self.path = Path(path)
@@ -33,6 +39,10 @@ class GrassPinpoints:
                 for pin in data['pins']:
                     if not pin['frame_id'] or not all(math.isfinite(float(pin[k])) for k in ('x', 'y', 'z')):
                         raise ValueError('Invalid pinpoint coordinates')
+                for pin in data['pins']:
+                    # Files written before the survey feature have no status.
+                    if pin.get('status') not in STATUSES:
+                        pin['status'] = PENDING
                 self.pins = data['pins']
             except (ValueError, KeyError, TypeError, OSError) as error:
                 self.load_error = str(error)
@@ -49,7 +59,9 @@ class GrassPinpoints:
                 continue
             def nearby(record):
                 return record['frame_id'] == frame_id and math.hypot(x - record['x'], y - record['y']) < self.radius
-            if any(nearby(pin) for pin in self.pins):
+            # A cleared pin is history (the hazard is gone), so it must not hide a new
+            # sighting; this also keeps a restarted simulation from being ignored.
+            if any(nearby(pin) for pin in self.pins if pin['status'] != 'cleared'):
                 continue
             candidate = next((c for c in self.candidates if nearby(c)), None)
             if candidate is None:
@@ -64,13 +76,55 @@ class GrassPinpoints:
             candidate.update(count=count, last_seen=timestamp)
             if count >= self.confirmations:
                 pin = {key: candidate[key] for key in ('x', 'y', 'z', 'frame_id')}
-                pin.update(id=len(self.pins) + 1, detected_at=timestamp)
+                pin.update(id=self.next_id(), detected_at=timestamp, status=PENDING)
                 self.pins.append(pin)
                 added.append(pin)
                 self.candidates.remove(candidate)
         if added:
             self.save()
         return added
+
+    def next_id(self):
+        """Ids never repeat while pins exist, even after some were discarded."""
+        return max((pin['id'] for pin in self.pins), default=0) + 1
+
+    @staticmethod
+    def _inside(pin, bounds):
+        xmin, ymin, xmax, ymax = bounds
+        return xmin <= pin['x'] <= xmax and ymin <= pin['y'] <= ymax
+
+    def open_in(self, bounds):
+        """Pins inside (xmin, ymin, xmax, ymax) that still need a visit."""
+        return [pin for pin in self.pins
+                if pin['status'] in OPEN_STATUSES and self._inside(pin, bounds)]
+
+    def set_status(self, pin_id, status):
+        """Record the outcome for one pin; returns False if the id is unknown."""
+        if status not in STATUSES:
+            raise ValueError(f'Unknown pin status {status!r}')
+        for pin in self.pins:
+            if pin['id'] == pin_id:
+                if pin['status'] != status:
+                    pin['status'] = status
+                    self.save()
+                return True
+        return False
+
+    def discard_for_resurvey(self, bounds):
+        """Forget earlier results inside an area before surveying it again.
+
+        Everything is dropped except false positives, which stay so the same
+        spot is not pinned and visited again. Returns the discarded ids.
+        """
+        gone = [pin['id'] for pin in self.pins
+                if self._inside(pin, bounds) and pin['status'] != 'false_positive']
+        if gone:
+            self.pins = [pin for pin in self.pins if pin['id'] not in gone]
+        before = len(self.candidates)
+        self.candidates = [c for c in self.candidates if not self._inside(c, bounds)]
+        if gone:
+            self.save()
+        return gone
 
     def clear(self):
         """Remove the persisted survey before resetting in-memory detections."""
