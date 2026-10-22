@@ -76,12 +76,11 @@
     </sensor>
     <material>Gazebo/Grey</material>
   </gazebo>
- 
   <!-- Move the base directly through the bridged cmd_vel topic. -->
   <gazebo>
     <plugin
-      filename="ignition-gazebo-velocity-control-system"
-      name="ignition::gazebo::systems::VelocityControl">
+      filename="libplanar_velocity_control.so"
+      name="roboticsstudio::PlanarVelocityControl">
       <topic>model/${gz_model_name}/cmd_vel</topic>
     </plugin>
   </gazebo>

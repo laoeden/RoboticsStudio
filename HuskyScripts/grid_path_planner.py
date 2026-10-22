@@ -17,7 +17,7 @@ def plan_path(
     goal: np.ndarray | None,
     obstacle_points: np.ndarray,
     resolution: float = 0.2,
-    robot_clearance: float = 0.45,
+    robot_clearance: float = 1.0,
 ) -> np.ndarray:
     if goal is None:
         return np.empty((0, 2), dtype=np.float32)
