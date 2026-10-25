@@ -78,7 +78,7 @@ class HuskyMotion(Node):
             'front_angle': math.pi / 4.0,
             'planning_range': 5.0,
             'path_resolution': 0.2,
-            'robot_clearance': 0.45,
+            'robot_clearance': 1.5,
             'grass_exclusion_radius': 3.5,
             'grass_detection_timeout': 120.0,
             # Lidar hits this close to the charging pad are ignored: the pad and its
