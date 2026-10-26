@@ -412,9 +412,11 @@ def send_drone_goal():
         z = float(drone_z_entry.get())
     except ValueError:
         ros_node.get_logger().error("Drone coordinates must be numbers")
+        add_log("UAV", "ERROR: Coordinates must be numbers")
         return
 
     publish_drone_goal(x, y, z)
+    add_log("UAV", f"Goal sent: X={x:.1f}, Y={y:.1f}, Z={z:.1f}")
 
 def publish_husky_goal(x, y):
     msg = PointStamped()
@@ -436,9 +438,11 @@ def send_husky_goal():
         y = float(husky_y_entry.get())
     except ValueError:
         ros_node.get_logger().error("Husky coordinates must be numbers")
+        add_log("UGV", "ERROR: Coordinates must be numbers")
         return
 
     publish_husky_goal(x, y)
+    add_log("UGV", f"Goal sent: X={x:.1f}, Y={y:.1f}")
 
 
 def timestamp():
@@ -483,7 +487,7 @@ def start_mission():
     publish_drone_goal(*spiral_targets[spiral_index])
 
     status_value.config(text="ACTIVE", fg=GREEN_BRIGHT)
-    mission_value.config(text="EXECUTING")
+    mission_value.config(text="UAV SURVEY")
     add_log("SYSTEM", "MISSION STARTED")
 
 
@@ -518,7 +522,7 @@ def start_husky():
         target_count = len(camera_risk_pending_goals)
     camera_risk_wakeup.set()
     status_value.config(text="ACTIVE", fg=GREEN_BRIGHT)
-    mission_value.config(text="HUSKY EXECUTING")
+    mission_value.config(text="UGV INVESTIGATION")
     add_log("UGV", f"Husky started with {target_count} queued coordinates")
 
 
@@ -530,8 +534,8 @@ def stop_mission():
     publish_command("STOP")
     spiral_active = False
 
-    status_value.config(text="HALTED", fg=RED)
-    mission_value.config(text="STOPPED")
+    status_value.config(text="STOPPED", fg=RED)
+    mission_value.config(text="ABORTED")
     add_log("SYSTEM", "MISSION STOPPED")
 
 
@@ -545,8 +549,8 @@ def return_to_base():
 
     publish_drone_goal(0.0, 0.0, 10.0)
 
-    status_value.config(text="RTB", fg=AMBER)
-    mission_value.config(text="RETURN TO BASE")
+    status_value.config(text="ACTIVE", fg=AMBER)
+    mission_value.config(text="RETURNING TO BASE")
     add_log("UGV", "RETURN TO BASE COMMAND SENT")
 
 
@@ -580,9 +584,9 @@ def emergency_stop():
             control.config(state="disabled")
 
         status_value.config(text="E-STOP", fg=RED)
-        mission_value.config(text="EMERGENCY STOP")
+        mission_value.config(text="ABORTED")
 
-        estop_button.config(text="[ RESET E-STOP ]")
+        estop_button.config(text="[ RESET E-STOP ] E")
 
         add_log("SYSTEM", "EMERGENCY STOP ACTIVATED")
 
@@ -595,7 +599,7 @@ def emergency_stop():
         status_value.config(text="READY", fg=GREEN_BRIGHT)
         mission_value.config(text="STANDBY")
 
-        estop_button.config(text="[ EMERGENCY STOP ]")
+        estop_button.config(text="[ EMERGENCY STOP ] E")
 
         add_log("SYSTEM", "EMERGENCY STOP RESET")
 
@@ -1073,11 +1077,14 @@ def refresh_survey_ui():
         last_mission_state = state
         if not estop_active:
             if active:
-                status_value.config(text="SURVEY", fg=GREEN_BRIGHT)
+                status_value.config(text="ACTIVE", fg=GREEN_BRIGHT)
+
             elif state == MissionState.COMPLETE:
                 status_value.config(text="READY", fg=GREEN_BRIGHT)
+
             elif state == MissionState.ABORTED:
-                status_value.config(text="HALTED", fg=RED)
+                status_value.config(text="STOPPED", fg=RED)
+
         if state != MissionState.IDLE:
             mission_value.config(text=state.value)
         draw_survey_overlay()
@@ -1192,9 +1199,9 @@ main_tab = tk.Frame(notebook, bg=BG)
 lidar_tab = tk.Frame(notebook, bg=BG)
 camera_risk_tab = tk.Frame(notebook, bg=BG)
 
-notebook.add(main_tab, text="MAIN")
-notebook.add(lidar_tab, text="HUSKY LIDAR")
-notebook.add(camera_risk_tab, text="CAMERA RISK")
+notebook.add(main_tab, text="OVERVIEW")
+notebook.add(lidar_tab, text="UGV LIDAR")
+notebook.add(camera_risk_tab, text="UAV VISION")
 
 # =========================================================
 # HUSKY LIDAR TAB
@@ -1216,6 +1223,23 @@ lidar_axis = lidar_figure.add_subplot(
 
 lidar_map_axis = lidar_figure.add_subplot(122)
 
+# Match LiDAR plots to FARMER dark theme
+lidar_figure.patch.set_facecolor(BG)
+
+for axis in (lidar_axis, lidar_map_axis):
+    axis.set_facecolor(PANEL)
+
+    axis.tick_params(colors=TEXT_DIM)
+
+    axis.title.set_color(GREEN_BRIGHT)
+    axis.xaxis.label.set_color(TEXT)
+    axis.yaxis.label.set_color(TEXT)
+
+    for spine in axis.spines.values():
+        spine.set_color(BORDER)
+
+    axis.grid(color=BORDER, alpha=0.35)
+
 # -------------------------
 # Polar lidar display
 # -------------------------
@@ -1224,7 +1248,7 @@ lidar_axis.set_theta_zero_location("E")
 lidar_axis.set_theta_direction(1)
 
 lidar_axis.set_title(
-    "Husky 360 lidar | front +/-45 deg | collision distance 1.0 m"
+    "UGV 360 LIDAR | FRONT +/-45 DEG | COLLISION DISTANCE 1.0 m"
 )
 
 lidar_axis.set_rmax(LIDAR_MAX_RANGE)
@@ -1240,7 +1264,7 @@ lidar_axis.fill_between(
     sector_angles,
     0.0,
     LIDAR_COLLISION_DISTANCE,
-    color="red",
+    color=RED,
     alpha=0.18,
     label="collision zone"
 )
@@ -1251,7 +1275,7 @@ lidar_axis.plot(
         sector_angles,
         LIDAR_COLLISION_DISTANCE
     ),
-    color="red",
+    color=RED,
     linewidth=1.5,
     label="1.0 m boundary"
 )
@@ -1267,7 +1291,7 @@ lidar_points, = lidar_axis.plot(
     [],
     [],
     ".",
-    color="steelblue",
+    color=GREEN,
     markersize=3,
     label="lidar"
 )
@@ -1276,15 +1300,21 @@ lidar_front_points, = lidar_axis.plot(
     [],
     [],
     ".",
-    color="darkorange",
+    color=AMBER,
     markersize=5,
     label="front sector"
 )
 
-lidar_axis.legend(
+lidar_legend = lidar_axis.legend(
     loc="upper right",
     bbox_to_anchor=(1.25, 1.1)
 )
+
+lidar_legend.get_frame().set_facecolor(PANEL_2)
+lidar_legend.get_frame().set_edgecolor(BORDER)
+
+for text in lidar_legend.get_texts():
+    text.set_color(TEXT)
 
 # -------------------------
 # World map display
@@ -1311,7 +1341,7 @@ lidar_map_points, = lidar_map_axis.plot(
     [],
     [],
     ".",
-    color="slateblue",
+    color=GREEN,
     markersize=4,
     label="current lidar"
 )
@@ -1320,7 +1350,7 @@ lidar_goal_points, = lidar_map_axis.plot(
     [],
     [],
     "x",
-    color="crimson",
+    color=RED,
     markersize=10,
     label="latest goal"
 )
@@ -1329,7 +1359,7 @@ lidar_path_points, = lidar_map_axis.plot(
     [],
     [],
     "-",
-    color="seagreen",
+    color=GREEN_BRIGHT,
     linewidth=2,
     label="planned path"
 )
@@ -1338,15 +1368,15 @@ lidar_robot_point, = lidar_map_axis.plot(
     [],
     [],
     "o",
-    color="black",
+    color=TEXT,
     markersize=7,
-    label="Husky"
+    label="UGV"
 )
 
 lidar_robot_heading, = lidar_map_axis.plot(
     [],
     [],
-    color="black",
+    color=TEXT,
     linewidth=2
 )
 
@@ -1354,7 +1384,7 @@ lidar_grass_exclusion = Circle(
     (0.0, 0.0),
     HUSKY_GRASS_EXCLUSION_RADIUS,
     fill=False,
-    edgecolor="#d3aa55",
+    edgecolor=AMBER,
     linestyle="--",
     linewidth=2,
     label="Grass exclusion",
@@ -1365,12 +1395,19 @@ lidar_map_axis.add_patch(lidar_grass_exclusion)
 lidar_status = lidar_figure.text(
     0.02,
     0.02,
-    "Waiting for /husky1/scan..."
+    "Waiting for /husky1/scan...",
+    color=TEXT_DIM
 )
 
-lidar_map_axis.legend(
+lidar_map_legend = lidar_map_axis.legend(
     loc="upper right"
 )
+
+lidar_map_legend.get_frame().set_facecolor(PANEL_2)
+lidar_map_legend.get_frame().set_edgecolor(BORDER)
+
+for text in lidar_map_legend.get_texts():
+    text.set_color(TEXT)
 
 lidar_canvas = FigureCanvasTkAgg(
     lidar_figure,
@@ -1661,11 +1698,11 @@ def tactical_button(text, command, colour=TEXT):
     return button
 
 
-start_button = tactical_button("[ START DRONE M ]", start_mission, GREEN_BRIGHT)
-start_husky_button = tactical_button("[ START HUSKY M]", start_husky, GREEN_BRIGHT)
-stop_button = tactical_button("[ STOP ]", stop_mission, AMBER)
-rtb_button = tactical_button("[ RETURN TO BASE ]", return_to_base)
-estop_button = tactical_button("[ EMERGENCY STOP ]", emergency_stop, RED)
+start_button = tactical_button("[ START UAV ] S", start_mission, GREEN_BRIGHT)
+start_husky_button = tactical_button("[ START UGV ] G", start_husky, GREEN_BRIGHT)
+stop_button = tactical_button("[ STOP ] X", stop_mission, AMBER)
+rtb_button = tactical_button("[ RETURN TO BASE ] R", return_to_base)
+estop_button = tactical_button("[ EMERGENCY STOP ] E", emergency_stop, RED)
 
 tk.Frame(left, bg=BORDER, height=1).pack(fill="x", padx=12, pady=(10, 6))
 
@@ -1707,7 +1744,7 @@ drone_target_frame.pack(fill="x", padx=15, pady=10)
 
 tk.Label(
     drone_target_frame,
-    text="DRONE TARGET",
+    text="UAV TARGET",
     bg=PANEL,
     fg=TEXT,
     font=("DejaVu Sans Mono", 10, "bold")
@@ -1727,9 +1764,19 @@ drone_z_entry.insert(0, "2")
 
 send_goal_button = tk.Button(
     drone_target_frame,
-    text="SEND GOAL",
-    command=send_drone_goal
+    text="[ SEND GOAL ]",
+    command=send_drone_goal,
+    bg=PANEL_2,
+    fg=GREEN_BRIGHT,
+    activebackground=GREEN,
+    activeforeground="black",
+    relief="flat",
+    bd=0,
+    highlightbackground=BORDER,
+    highlightthickness=1,
+    font=("DejaVu Sans Mono", 8, "bold")
 )
+
 send_goal_button.pack(side="left", padx=5)
 
 husky_target_frame = tk.Frame(left, bg=PANEL)
@@ -1737,7 +1784,7 @@ husky_target_frame.pack(fill="x", padx=15, pady=10)
 
 tk.Label(
     husky_target_frame,
-    text="GROUND ROBOT TARGET",
+    text="UGV TARGET",
     bg=PANEL,
     fg=TEXT,
     font=("DejaVu Sans Mono", 10, "bold")
@@ -1753,8 +1800,17 @@ husky_y_entry.insert(0, "0")
 
 send_husky_goal_button = tk.Button(
     husky_target_frame,
-    text="SEND GOAL",
-    command=send_husky_goal
+    text="[ SEND GOAL ]",
+    command=send_husky_goal,
+    bg=PANEL_2,
+    fg=GREEN_BRIGHT,
+    activebackground=GREEN,
+    activeforeground="black",
+    relief="flat",
+    bd=0,
+    highlightbackground=BORDER,
+    highlightthickness=1,
+    font=("DejaVu Sans Mono", 8, "bold")
 )
 
 send_husky_goal_button.pack(side="left", padx=5)
@@ -2908,5 +2964,22 @@ update_lidar_ui()
 update_main_lidar_overlay()
 update_depth_heatmap()
 update_camera_risk_ui()
+
+# Keyboard shortcuts for frequent users
+def handle_shortcut(event):
+    key = event.keysym.lower()
+
+    if key == "s":
+        start_mission()
+    elif key == "g":
+        start_husky()
+    elif key == "x":
+        stop_mission()
+    elif key == "r":
+        return_to_base()
+    elif key == "e":
+        emergency_stop()
+
+root.bind_all("<KeyPress>", handle_shortcut)
 
 root.mainloop()
