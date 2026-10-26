@@ -116,6 +116,7 @@ spiral_active = False
 spiral_targets = []
 spiral_index = 0
 estop_active = False
+rtb_active = False
 
 # Survey mission (see the SURVEY MISSION section below).
 survey_mode_active = False      # True while a survey owns the camera-risk pipeline
@@ -540,12 +541,13 @@ def stop_mission():
 
 
 def return_to_base():
-    global spiral_active
+    global spiral_active, rtb_active
 
     mission.abort("return to base requested")
     pause_husky_dispatch()
     publish_command("RETURN_TO_BASE")
     spiral_active = False
+    rtb_active = True
 
     publish_drone_goal(0.0, 0.0, 10.0)
 
@@ -2182,10 +2184,31 @@ def advance_spiral():
 def get_synced_uav_position():
     return uav_x, uav_y, uav_z
 
-
 def update_telemetry_ui():
+    global rtb_active
     advance_spiral()
     service_mission()
+
+    if rtb_active:
+        uav_home = (
+            uav_x is not None
+            and uav_y is not None
+            and uav_z is not None
+            and math.hypot(uav_x, uav_y) <= 0.5
+            and abs(uav_z - 10.0) <= 0.5
+        )
+
+        ugv_home = (
+            ugv_x is not None
+            and ugv_y is not None
+            and math.hypot(ugv_x, ugv_y) <= 0.5
+        )
+
+        if uav_home and ugv_home:
+            rtb_active = False
+            status_value.config(text="READY", fg=GREEN_BRIGHT)
+            mission_value.config(text="STANDBY")
+            add_log("SYSTEM", "RETURN TO BASE COMPLETE")
 
     display_uav_x, display_uav_y, display_uav_z = get_synced_uav_position()
 
@@ -2895,6 +2918,7 @@ def mark_survey_coverage():
 
 
 def update_camera_risk_ui():
+    global husky_dispatch_enabled
     mark_survey_coverage()
     while not yolo_detection_queue.empty():
         point, frame_id, stamp = yolo_detection_queue.get_nowait()
@@ -2928,9 +2952,27 @@ def update_camera_risk_ui():
 
     with camera_risk_lock:
         pin_count = len(grass_pinpoints.pins)
+
     while not camera_risk_logs.empty():
         source, message = camera_risk_logs.get_nowait()
         add_log(source, message)
+
+    with camera_risk_lock:
+        ugv_complete = (
+            husky_dispatch_enabled
+            and camera_risk_active_goal is None
+            and not camera_risk_pending_goals
+            and len(camera_risk_completed_goals) > 0
+        )
+
+        if ugv_complete:
+            husky_dispatch_enabled = False
+
+    if ugv_complete:
+        status_value.config(text="READY", fg=GREEN_BRIGHT)
+        mission_value.config(text="COMPLETE")
+        add_log("UGV", "INVESTIGATION COMPLETE")
+
     if latest_yolo_image is not None:
         risk_image = PILImage.fromarray(
             cv2.cvtColor(latest_yolo_image, cv2.COLOR_BGR2RGB)
