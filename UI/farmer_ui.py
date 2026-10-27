@@ -108,6 +108,9 @@ ugv_heading = None
 latest_lidar_scan = None
 latest_husky_goal = None
 
+last_drone_goal = None
+last_ugv_goal = None
+
 uav_x = None
 uav_y = None
 uav_z = None
@@ -407,6 +410,11 @@ def publish_drone_goal(x, y, z):
     ros_node.get_logger().info(f"Sent drone goal: ({x}, {y}, {z})")
 
 def send_drone_goal():
+    global last_drone_goal
+    if rtb_active:
+        add_log("UAV", "Cannot send goal while returning to base")
+        return
+
     try:
         x = float(drone_x_entry.get())
         y = float(drone_y_entry.get())
@@ -416,8 +424,23 @@ def send_drone_goal():
         add_log("UAV", "ERROR: Coordinates must be numbers")
         return
 
+    if abs(x) > WORLD_HALF_EXTENT or abs(y) > WORLD_HALF_EXTENT:
+        add_log("UAV", "ERROR: Target must be inside the field (-25 to 25 m)")
+        return
+
+    if z <= 0:
+        add_log("UAV", "ERROR: Altitude must be greater than 0 m")
+        return
+
+    last_drone_goal = (x, y, z)
+
+    last_uav_goal_label.config(
+    text=f"{x:.1f}, {y:.1f}, {z:.1f}"
+)
+    
     publish_drone_goal(x, y, z)
     add_log("UAV", f"Goal sent: X={x:.1f}, Y={y:.1f}, Z={z:.1f}")
+    
 
 def publish_husky_goal(x, y):
     msg = PointStamped()
@@ -434,6 +457,11 @@ def publish_husky_goal(x, y):
 
 
 def send_husky_goal():
+    global last_ugv_goal
+    if rtb_active:
+        add_log("UGV", "Cannot send goal while returning to base")
+        return
+
     try:
         x = float(husky_x_entry.get())
         y = float(husky_y_entry.get())
@@ -442,9 +470,34 @@ def send_husky_goal():
         add_log("UGV", "ERROR: Coordinates must be numbers")
         return
 
+    if abs(x) > WORLD_HALF_EXTENT or abs(y) > WORLD_HALF_EXTENT:
+        add_log("UGV", "ERROR: Target must be inside the field (-25 to 25 m)")
+        return
+
+    last_ugv_goal = (x, y)
+
+    last_ugv_goal_label.config(
+    text=f"{x:.1f}, {y:.1f}"
+)
+    
     publish_husky_goal(x, y)
     add_log("UGV", f"Goal sent: X={x:.1f}, Y={y:.1f}")
 
+def clear_husky_goals():
+    global camera_risk_active_goal, husky_dispatch_enabled, latest_husky_goal
+
+    if rtb_active:
+        add_log("UGV", "Cannot clear goals while returning to base")
+        return
+
+    with camera_risk_lock:
+        camera_risk_pending_goals.clear()
+        camera_risk_active_goal = None
+        husky_dispatch_enabled = False
+
+    latest_husky_goal = None
+    publish_command("CLEAR_GOAL")
+    add_log("UGV", "UGV goals cleared")
 
 def timestamp():
     return datetime.now().strftime("%H:%M:%S")
@@ -458,6 +511,14 @@ def add_log(source, message):
 
 def start_mission():
     global spiral_active, spiral_targets, spiral_index
+
+    if rtb_active:
+        add_log("SYSTEM", "Wait for return to base to finish")
+        return
+
+    if estop_active:
+        add_log("SYSTEM", "Cannot start: emergency stop is active")
+        return
 
     if mission.active:
         add_log("SYSTEM", "A survey is running; abort it before starting the spiral")
@@ -505,8 +566,15 @@ def pause_husky_dispatch():
 def start_husky():
     """Release collected coordinates independently of the detection source."""
     global husky_dispatch_enabled
-    if estop_active:
+
+    if rtb_active:
+        add_log("UGV", "Wait for return to base to finish")
         return
+
+    if estop_active:
+        add_log("UGV", "Cannot start: emergency stop is active")
+        return
+
     if mission.active:
         add_log("UGV", "A survey is running; abort it before starting the Husky")
         return
@@ -528,12 +596,13 @@ def start_husky():
 
 
 def stop_mission():
-    global spiral_active
+    global spiral_active, rtb_active
 
     mission.abort("operator stop")
     pause_husky_dispatch()
     publish_command("STOP")
     spiral_active = False
+    rtb_active = False
 
     status_value.config(text="STOPPED", fg=RED)
     mission_value.config(text="ABORTED")
@@ -557,7 +626,7 @@ def return_to_base():
 
 
 def emergency_stop():
-    global estop_active, spiral_active
+    global estop_active, spiral_active, rtb_active
 
     estop_active = not estop_active
 
@@ -572,13 +641,15 @@ def emergency_stop():
         drone_z_entry,
         send_husky_goal_button,
         husky_x_entry,
-        husky_y_entry
+        husky_y_entry,
+        clear_husky_button,
     ]
 
     if estop_active:
         pause_husky_dispatch()
         publish_command("EMERGENCY_STOP")
         spiral_active = False
+        rtb_active = False
         set_draw_mode(False)
         mission.abort("emergency stop", hover=False)
 
@@ -1019,6 +1090,10 @@ def clear_survey_area():
 # ---------- starting and stopping ----------
 
 def start_survey():
+    if rtb_active:
+        add_log("SURVEY", "Wait for return to base to finish")
+        return
+
     if estop_active:
         add_log("SURVEY", "Cannot start: emergency stop is active")
         return
@@ -1656,6 +1731,9 @@ uav_x_label = info_row(left, "UAV X", "-- m")
 uav_y_label = info_row(left, "UAV Y", "-- m")
 uav_z_label = info_row(left, "UAV Z", "-- m")
 
+last_uav_goal_label = info_row(left, "LAST UAV GOAL", "--")
+last_ugv_goal_label = info_row(left, "LAST UGV GOAL", "--")
+
 
 tk.Frame(left, bg=BORDER, height=1).pack(
     fill="x",
@@ -1702,6 +1780,7 @@ def tactical_button(text, command, colour=TEXT):
 
 start_button = tactical_button("[ START UAV ] S", start_mission, GREEN_BRIGHT)
 start_husky_button = tactical_button("[ START UGV ] G", start_husky, GREEN_BRIGHT)
+clear_husky_button = tactical_button("[ CLEAR UGV GOALS ]", clear_husky_goals)
 stop_button = tactical_button("[ STOP ] X", stop_mission, AMBER)
 rtb_button = tactical_button("[ RETURN TO BASE ] R", return_to_base)
 estop_button = tactical_button("[ EMERGENCY STOP ] E", emergency_stop, RED)
@@ -3009,6 +3088,8 @@ update_camera_risk_ui()
 
 # Keyboard shortcuts for frequent users
 def handle_shortcut(event):
+    if isinstance(event.widget, tk.Entry):
+        return
     key = event.keysym.lower()
 
     if key == "s":
