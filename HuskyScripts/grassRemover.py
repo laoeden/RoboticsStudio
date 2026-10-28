@@ -15,6 +15,7 @@ import time
 import xml.etree.ElementTree as ET
 
 import rclpy
+from geometry_msgs.msg import PointStamped
 from nav_msgs.msg import Odometry
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
@@ -48,6 +49,9 @@ class GrassRemover(Node):
         defaults = {
             'world_file': str(Path(__file__).resolve().parents[1] / 'world/worldterrian.sdf'),
             'odom_topic': '/husky1/odometry',
+            # Every successful removal is announced here (world XY of the patch),
+            # so the survey mission can tell real hazards from false detections.
+            'removed_topic': '/hazard_removed',
 
             'removal_radius': 2.5, #radius adjustment
 
@@ -75,6 +79,8 @@ class GrassRemover(Node):
         self.position = None
         self.received_at = 0.0
         self.retry_after = {}
+        self.removed_pub = self.create_publisher(
+            PointStamped, self.get_parameter('removed_topic').value, 10)
         self.create_subscription(
             Odometry, self.get_parameter('odom_topic').value,
             self.on_odom, qos_profile_sensor_data,
@@ -126,6 +132,11 @@ class GrassRemover(Node):
                 del self.patches[name]
                 self.retry_after.pop(name, None)
                 self.get_logger().info(f'Removed {name}')
+                event = PointStamped()
+                event.header.stamp = self.get_clock().now().to_msg()
+                event.header.frame_id = 'world'
+                event.point.x, event.point.y = float(gx), float(gy)
+                self.removed_pub.publish(event)
             else:
                 self.retry_after[name] = time.monotonic() + 5.0
                 self.get_logger().warning(f'Could not remove {name}; retrying in 5 s. {detail}')

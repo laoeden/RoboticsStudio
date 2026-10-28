@@ -26,7 +26,8 @@ SIM_PID=$!
 sleep 8
 
 # 2. Start drone coordinate controller
-"$PYTHON" DroneStuff/DroneMotion.py &
+# Cruise at 2 m/s so survey sweeps and transits finish in reasonable time.
+"$PYTHON" DroneStuff/DroneMotion.py --ros-args -p max_speed:=2.0 &
 
 DRONE_PID=$!
 

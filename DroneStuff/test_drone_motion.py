@@ -27,6 +27,12 @@ class MovementTests(unittest.TestCase):
         self.assertAlmostEqual(velocity[0], 0)
         self.assertAlmostEqual(velocity[1], -1)
 
+    def test_long_legs_are_capped_and_short_legs_slow_down(self):
+        far, _ = body_velocity((0, 0, 0), (40, 0, 0), (0, 0, 0, 1), .8, 2, .15)
+        self.assertAlmostEqual(far[0], 2.0)
+        near, _ = body_velocity((0, 0, 0), (1, 0, 0), (0, 0, 0, 1), .8, 2, .15)
+        self.assertAlmostEqual(near[0], 0.8)
+
     def test_converges_in_three_dimensions(self):
         position = (0, 0, 0)
         target = (3, -2, 4)
@@ -83,6 +89,7 @@ class ControllerAvoidanceTests(unittest.TestCase):
         node.odom_received = time.monotonic()
         node.odom_timeout, node.goal_timeout = 1.0, 120.0
         node.gain, node.max_speed, node.tolerance = .8, 1.0, .15
+        node.estop_active = False   # a bare Mock attribute would be truthy and stop tick() early
         node.goal = PointStamped()
         node.goal.header.frame_id = 'parrot1_odom'
         node.goal.point.z = 3.0

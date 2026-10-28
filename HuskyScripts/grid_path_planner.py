@@ -4,6 +4,12 @@ import heapq
 
 import numpy as np
 
+# Obstacles are always kept at least this far from the planned path. The larger
+# robot_clearance is a preference that is relaxed near the start and the goal (see
+# plan_path), so a robot parked inside it can still drive out and a goal close to an
+# obstacle can still be reached.
+HARD_CLEARANCE = 0.6
+
 
 def plan_path(
     robot_x: float,
@@ -19,14 +25,29 @@ def plan_path(
     start_cell = (int(round(robot_x / resolution)), int(round(robot_y / resolution)))
     goal_cell = (int(round(float(goal[0]) / resolution)), int(round(float(goal[1]) / resolution)))
     obstacle_cells: set[tuple[int, int]] = set()
+    core_cells: set[tuple[int, int]] = set()
     inflation = int(np.ceil(robot_clearance / resolution))
+    core_inflation = min(inflation, int(np.ceil(HARD_CLEARANCE / resolution)))
     for point in obstacle_points:
         cell_x = int(round(float(point[0]) / resolution))
         cell_y = int(round(float(point[1]) / resolution))
         for offset_x in range(-inflation, inflation + 1):
             for offset_y in range(-inflation, inflation + 1):
-                if offset_x * offset_x + offset_y * offset_y <= inflation * inflation:
+                distance_squared = offset_x * offset_x + offset_y * offset_y
+                if distance_squared <= inflation * inflation:
                     obstacle_cells.add((cell_x + offset_x, cell_y + offset_y))
+                if distance_squared <= core_inflation * core_inflation:
+                    core_cells.add((cell_x + offset_x, cell_y + offset_y))
+    # A start or goal inside the clearance margin would otherwise be walled in by it.
+    # Open the margin (but never the hard core) around such a cell.
+    reach_squared = (inflation + 1) ** 2
+    for anchor in (start_cell, goal_cell):
+        if anchor in obstacle_cells:
+            obstacle_cells = {
+                cell for cell in obstacle_cells
+                if cell in core_cells
+                or (cell[0] - anchor[0]) ** 2 + (cell[1] - anchor[1]) ** 2 > reach_squared
+            }
     obstacle_cells.discard(start_cell)
     obstacle_cells.discard(goal_cell)
 
