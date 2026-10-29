@@ -27,8 +27,6 @@ class GrassPinpoints:
         self.confirmations = confirmations
         self.pins = []
         self.candidates = []
-<<<<<<< HEAD
-=======
         self.load_error = None
         if self.path.exists():
             try:
@@ -45,7 +43,6 @@ class GrassPinpoints:
                 self.pins = data['pins']
             except (ValueError, KeyError, TypeError, OSError) as error:
                 self.load_error = str(error)
->>>>>>> origin/main
 
     def observe(self, points, frame_id, timestamp):
         if not frame_id:

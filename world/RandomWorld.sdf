@@ -1,0 +1,315 @@
+<?xml version='1.0' encoding='utf-8'?>
+<sdf version="1.8">
+  <world name="TerrainWorld">
+    <gravity>0 0 -9.81</gravity>
+    <physics name="default_physics" type="ignored">
+      <max_step_size>0.01</max_step_size>
+      <real_time_factor>1</real_time_factor>
+      <real_time_update_rate>100</real_time_update_rate>
+    </physics>
+    <spherical_coordinates>
+      <latitude_deg>0.0</latitude_deg>
+      <longitude_deg>0.0</longitude_deg>
+      <elevation>0.0</elevation>
+      <heading_deg>0</heading_deg>
+      <surface_model>EARTH_WGS84</surface_model>
+    </spherical_coordinates>
+    <scene>
+      <ambient>0.8 0.8 0.8 1</ambient>
+      <background>0.7 0.7 0.7 1</background>
+      <shadows>false</shadows>
+    </scene>
+    <light name="sun" type="directional">
+      <cast_shadows>false</cast_shadows>
+      <direction>-0.5 0.5 -1</direction>
+      <diffuse>1 1 1 1</diffuse>
+    </light>
+    <model name="terrain">
+      <static>true</static>
+      <link name="terrain_link">
+        <collision name="collision">
+          <geometry>
+            <mesh>
+              <uri>../models/GreyHeatMapV2/GreyMapV2Terrain.obj</uri>
+              <scale>0.5 0.5 0.166667</scale>
+            </mesh>
+          </geometry>
+        </collision>
+        <visual name="visual">
+          <geometry>
+            <mesh>
+              <uri>../models/GreyHeatMapV2/GreyMapV2Terrain.obj</uri>
+              <scale>0.5 0.5 0.166667</scale>
+            </mesh>
+          </geometry>
+        </visual>
+      </link>
+    </model>
+    <include>
+      <uri>https://fuel.gazebosim.org/1.0/OpenRobotics/models/Falling%20Rock%201</uri>
+      <name>rocks1</name>
+      <pose>-3 -2 5 0 0 0</pose>
+      <static>false</static>
+    </include>
+    <include>
+      <uri>model://SomeKangaroo</uri>
+      <name>kangaroo</name>
+      <pose>2 0 0.960 0 0 0</pose>
+      <static>true</static>
+    </include>
+    <model name="charging_station">
+      <static>true</static>
+      <pose>0 0 1.0 0 0 0</pose>
+      <link name="pad_link">
+        <visual name="pad">
+          <pose>0 0 0.01 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>2.0 2.0 0.02</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>0.1 0.4 0.9 1</ambient>
+            <diffuse>0.1 0.4 0.9 1</diffuse>
+          </material>
+        </visual>
+        <visual name="post">
+          <pose>-0.8 0 0.4 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>0.15 0.4 0.8</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>0.9 0.8 0.1 1</ambient>
+            <diffuse>0.9 0.8 0.1 1</diffuse>
+          </material>
+        </visual>
+      </link>
+    </model>
+    <model name="boundary_wall_east">
+      <static>true</static>
+      <pose>21 25 0 1.57079632679 0 0</pose>
+      <link name="wall_link">
+        <collision name="collision">
+          <geometry>
+            <polyline>
+              <point>0 0</point>
+              <point>4 0</point>
+              <point>4 4</point>
+              <height>50</height>
+            </polyline>
+          </geometry>
+        </collision>
+        <visual name="visual">
+          <geometry>
+            <polyline>
+              <point>0 0</point>
+              <point>4 0</point>
+              <point>4 4</point>
+              <height>50</height>
+            </polyline>
+          </geometry>
+          <material>
+            <ambient>0.05 0.20 0.04 1</ambient>
+            <diffuse>0.05 0.20 0.04 1</diffuse>
+          </material>
+        </visual>
+      </link>
+    </model>
+    <model name="boundary_wall_north">
+      <static>true</static>
+      <pose>-25 21 0 1.57079632679 0 1.57079632679</pose>
+      <link name="wall_link">
+        <collision name="collision">
+          <geometry>
+            <polyline>
+              <point>0 0</point>
+              <point>4 0</point>
+              <point>4 4</point>
+              <height>50</height>
+            </polyline>
+          </geometry>
+        </collision>
+        <visual name="visual">
+          <geometry>
+            <polyline>
+              <point>0 0</point>
+              <point>4 0</point>
+              <point>4 4</point>
+              <height>50</height>
+            </polyline>
+          </geometry>
+          <material>
+            <ambient>0.05 0.20 0.04 1</ambient>
+            <diffuse>0.05 0.20 0.04 1</diffuse>
+          </material>
+        </visual>
+      </link>
+    </model>
+    <model name="boundary_wall_west">
+      <static>true</static>
+      <pose>-21 -25 0 1.57079632679 0 3.14159265359</pose>
+      <link name="wall_link">
+        <collision name="collision">
+          <geometry>
+            <polyline>
+              <point>0 0</point>
+              <point>4 0</point>
+              <point>4 4</point>
+              <height>50</height>
+            </polyline>
+          </geometry>
+        </collision>
+        <visual name="visual">
+          <geometry>
+            <polyline>
+              <point>0 0</point>
+              <point>4 0</point>
+              <point>4 4</point>
+              <height>50</height>
+            </polyline>
+          </geometry>
+          <material>
+            <ambient>0.05 0.20 0.04 1</ambient>
+            <diffuse>0.05 0.20 0.04 1</diffuse>
+          </material>
+        </visual>
+      </link>
+    </model>
+    <model name="boundary_wall_south">
+      <static>true</static>
+      <pose>25 -21 0 1.57079632679 0 -1.57079632679</pose>
+      <link name="wall_link">
+        <collision name="collision">
+          <geometry>
+            <polyline>
+              <point>0 0</point>
+              <point>4 0</point>
+              <point>4 4</point>
+              <height>50</height>
+            </polyline>
+          </geometry>
+        </collision>
+        <visual name="visual">
+          <geometry>
+            <polyline>
+              <point>0 0</point>
+              <point>4 0</point>
+              <point>4 4</point>
+              <height>50</height>
+            </polyline>
+          </geometry>
+          <material>
+            <ambient>0.05 0.20 0.04 1</ambient>
+            <diffuse>0.05 0.20 0.04 1</diffuse>
+          </material>
+        </visual>
+      </link>
+    </model>
+    <!-- Random vegetation poses:
+         The fixed numbers below are the last randomly generated positions.
+         tools/generate_random_world.py chooses random X/Y positions and yaw,
+         calculates Z from the terrain, then saves the results in these poses.
+         Pose values are: x y z roll pitch yaw
+
+         Opening this SDF directly uses the saved positions; SDF does not
+         generate random numbers itself and use a tool to do it. 
+       
+    -->
+    <include>
+      <uri>
+        https://fuel.gazebosim.org/1.0/OpenRobotics/models/Oak%20tree
+      </uri>
+      <name>oak_1</name>
+      <pose>1.623330 16.578033 1.172680 0 0 1.309778</pose>
+      <static>true</static>
+    </include>
+    <include>
+      <uri>
+        https://fuel.gazebosim.org/1.0/OpenRobotics/models/Oak%20tree
+      </uri>
+      <name>oak_2</name>
+      <pose>-2.901962 -14.731389 1.780233 0 0 -0.651097</pose>
+      <static>true</static>
+    </include>
+    <include>
+      <uri>
+        https://fuel.gazebosim.org/1.0/OpenRobotics/models/Oak%20tree
+      </uri>
+      <name>oak_3</name>
+      <pose>-10.799354 -12.137367 0.905564 0 0 -0.588073</pose>
+      <static>true</static>
+    </include>
+    <include>
+      <uri>
+        https://fuel.gazebosim.org/1.0/OpenRobotics/models/Oak%20tree
+      </uri>
+      <name>oak_4</name>
+      <pose>-6.603500 12.295476 0.663505 0 0 1.494422</pose>
+      <static>true</static>
+    </include>
+    <include>
+      <uri>
+        https://fuel.gazebosim.org/1.0/OpenRobotics/models/Oak%20tree
+      </uri>
+      <name>oak_5</name>
+      <pose>5.526581 -12.660326 1.095066 0 0 2.315822</pose>
+      <static>true</static>
+    </include>
+    <include>
+      <uri>
+        https://fuel.gazebosim.org/1.0/OpenRobotics/models/Oak%20tree
+      </uri>
+      <name>oak_6</name>
+      <pose>6.546416 5.497430 1.046726 0 0 2.447455</pose>
+      <static>true</static>
+    </include>
+    <include>
+      <uri>
+        https://fuel.gazebosim.org/1.0/OpenRobotics/models/Oak%20tree
+      </uri>
+      <name>oak_7</name>
+      <pose>9.865903 -1.695803 2.119988 0 0 -2.706567</pose>
+      <static>true</static>
+    </include>
+    <include>
+      <uri>
+        https://fuel.gazebosim.org/1.0/OpenRobotics/models/Pine%20tree
+      </uri>
+      <name>pine_8</name>
+      <pose>-13.628201 18.414972 0.988252 0 0 2.329201</pose>
+      <static>true</static>
+    </include>
+    <include>
+      <uri>model://Dry_Grass</uri>
+      <name>dry_grass</name>
+      <pose>1.911364 -5.212285 1.564668 0 0 -2.016742</pose>
+      <static>true</static>
+    </include>
+    <include>
+      <uri>model://Dry_Grass</uri>
+      <name>dry_grass_2</name>
+      <pose>-3.855529 -7.956006 1.117757 0 0 0.022648</pose>
+      <static>true</static>
+    </include>
+    <include>
+      <uri>model://Dry_Grass</uri>
+      <name>dry_grass_3</name>
+      <pose>-11.497705 5.168328 1.934886 0 0 -0.713620</pose>
+      <static>true</static>
+    </include>
+    <include>
+      <uri>model://Dry_Grass</uri>
+      <name>dry_grass_4</name>
+      <pose>-5.070008 19.045356 1.032739 0 0 2.315494</pose>
+      <static>true</static>
+    </include>
+    <include>
+      <uri>model://Dry_Grass</uri>
+      <name>dry_grass_5</name>
+      <pose>16.370326 18.664143 0.117948 0 0 -1.403495</pose>
+      <static>true</static>
+    </include>
+  </world>
+</sdf>

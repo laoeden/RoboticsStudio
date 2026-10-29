@@ -5,6 +5,7 @@ from launch.actions import (
     DeclareLaunchArgument,
     GroupAction,
     IncludeLaunchDescription,
+    OpaqueFunction,
     SetEnvironmentVariable,
     TimerAction,
 )
@@ -280,7 +281,7 @@ def generate_launch_description():
         'world',
         default_value='simple_trees',
         description='Which world to load',
-        choices=['simple_trees', 'large_demo', 'worldterrian'],
+        choices=['simple_trees', 'large_demo', 'worldterrian', 'RandomWorld'],
     )
     ld.add_action(world_launch_arg)
 
@@ -324,6 +325,17 @@ def generate_launch_description():
         name='GZ_SIM_SERVER_CONFIG_PATH',
         value=server_config_file,
     ))
+
+    def randomize_world(context):
+        if LaunchConfiguration('world').perform(context) == 'RandomWorld':
+            import runpy
+            generator = runpy.run_path(str(Path(workspace_root) / 'tools/generate_random_world.py'))
+            world_file = Path(LaunchConfiguration('world_dir').perform(context)) / 'RandomWorld.sdf'
+            generator['generate'](world_file, world_file)
+        return []
+
+    # Generate before Gazebo reads the SDF, including direct ros2 launches.
+    ld.add_action(OpaqueFunction(function=randomize_world))
 
     # Start Gazebo once.
     ld.add_action(IncludeLaunchDescription(
@@ -376,7 +388,7 @@ def generate_launch_description():
         # Use a higher spawn point for the raised terrain.
         z=PythonExpression([
             "'2.0' if '", LaunchConfiguration('world'),
-            "' == 'worldterrian' else '0.4'",
+            "' in ['worldterrian', 'RandomWorld'] else '0.4'",
         ]),
         spawn_delay=3.0,
     )

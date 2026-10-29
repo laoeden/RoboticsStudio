@@ -11,12 +11,18 @@ if [[ ! -x "$PYTHON" ]]; then
 	exit 1
 fi
 
-echo "Starting FARMER simulation..."
+# Pass RandomWorld for a fresh layout on every simulation launch.
+WORLD="${1:-worldterrian}"
+
+echo "Starting FARMER simulation ($WORLD)..."
+
+#./run_farmer.bash RandomWorld
+#this run it with the random world
 
 # 1. Start Gazebo with Husky + Parrot
 env LIBGL_ALWAYS_SOFTWARE=1 ros2 launch \
 41068_ignition_bringup 41068_ignition.launch.py \
-world:=worldterrian \
+world:="$WORLD" \
 husky:=True \
 parrot:=True &
 
@@ -37,7 +43,7 @@ DRONE_PID=$!
 HUSKY_PID=$!
 
 # Remove grass patches as the Husky approaches them.
-"$PYTHON" HuskyScripts/grassRemover.py &
+"$PYTHON" HuskyScripts/grassRemover.py --ros-args -p world_file:="$PWD/world/$WORLD.sdf" &
 
 GRASS_PID=$!
 
