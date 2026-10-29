@@ -1,5 +1,7 @@
 """Track grass sightings in memory in their source coordinate frame."""
+import json
 import math
+from pathlib import Path
 
 
 def match_pin_samples(rgb_samples, depth_samples, odom_samples, tolerance=0.25):
@@ -22,13 +24,14 @@ STATUSES = (PENDING, ACTIVE, 'cleared', 'false_positive', 'unreachable', 'visite
 
 
 class GrassPinpoints:
-    def __init__(self, radius=1.0, confirmations=1):
+    def __init__(self, path=None, radius=1.0, confirmations=1):
+        self.path = Path(path) if path is not None else None
         self.radius = radius
         self.confirmations = confirmations
         self.pins = []
         self.candidates = []
         self.load_error = None
-        if self.path.exists():
+        if self.path is not None and self.path.exists():
             try:
                 data = json.loads(self.path.read_text())
                 if data.get('version') != 1:
@@ -77,6 +80,8 @@ class GrassPinpoints:
                 self.pins.append(pin)
                 added.append(pin)
                 self.candidates.remove(candidate)
+        if added and self.path is not None:
+            self.save()
         return added
 
     def next_id(self):
@@ -123,5 +128,16 @@ class GrassPinpoints:
 
     def clear(self):
         """Reset the current session's detections without accessing disk."""
+        if self.path is not None:
+            self.path.unlink(missing_ok=True)
         self.pins.clear()
         self.candidates.clear()
+        self.load_error = None
+
+    def save(self):
+        """Persist pins when this tracker was configured with a path."""
+        if self.path is None:
+            return
+        temporary = self.path.with_suffix('.tmp')
+        temporary.write_text(json.dumps({'version': 1, 'pins': self.pins}, indent=2) + '\n')
+        temporary.replace(self.path)

@@ -60,7 +60,7 @@ sleep 2
 #CAMERA_RISK_PID=$!
 
 # Start YOLO inference on the drone camera
-"$PYTHON" infer_yolo_camera.py &
+"$PYTHON" infer_yolo_camera.py "my_model (2)/my_model.pt" &
 
 CAMERA_INFERENCE_PID=$!
 
