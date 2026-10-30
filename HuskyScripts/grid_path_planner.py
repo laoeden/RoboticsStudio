@@ -4,11 +4,13 @@ import heapq
 
 import numpy as np
 
-# Obstacles are always kept at least this far from the planned path. The larger
-# robot_clearance is a preference that is relaxed near the start and the goal (see
-# plan_path), so a robot parked inside it can still drive out and a goal close to an
-# obstacle can still be reached.
-HARD_CLEARANCE = 0.6
+# Obstacles are always kept at least this far from the planned path. The Husky is
+# about 1.0 x 0.67 m, so its corners sweep 0.60 m from the lidar at its centre; 0.75 m
+# leaves a margin for turning and control lag. The larger robot_clearance is only a
+# preference: it is relaxed near the start and the goal (see plan_path), so a robot
+# parked inside it can still drive out and a goal close to an obstacle can still be
+# reached.
+HARD_CLEARANCE = 0.75
 
 
 def plan_path(
@@ -48,6 +50,28 @@ def plan_path(
                 if cell in core_cells
                 or (cell[0] - anchor[0]) ** 2 + (cell[1] - anchor[1]) ** 2 > reach_squared
             }
+    # A robot that is already right up against an obstacle (or a goal that is) sits
+    # inside the hard core. Let it move to any cell that is no closer to the obstacle
+    # than the anchor itself, so it can back or slide away instead of being walled in.
+    if len(obstacle_points):
+        points = np.asarray(obstacle_points, dtype=np.float64).reshape(-1, 2)
+        core_reach = int(np.ceil(HARD_CLEARANCE / resolution)) + 1
+        for anchor in (start_cell, goal_cell):
+            anchor_xy = np.array(anchor, dtype=np.float64) * resolution
+            near = points[np.hypot(*(points - anchor_xy).T) <= HARD_CLEARANCE + 2.0 * resolution + 1.0]
+            if not len(near):
+                continue
+            anchor_distance = float(np.min(np.hypot(*(near - anchor_xy).T)))
+            if anchor_distance >= HARD_CLEARANCE:
+                continue
+            for cell in [
+                c for c in core_cells
+                if abs(c[0] - anchor[0]) <= core_reach and abs(c[1] - anchor[1]) <= core_reach
+            ]:
+                cell_xy = np.array(cell, dtype=np.float64) * resolution
+                if float(np.min(np.hypot(*(near - cell_xy).T))) >= anchor_distance - 0.05:
+                    core_cells.discard(cell)
+                    obstacle_cells.discard(cell)
     obstacle_cells.discard(start_cell)
     obstacle_cells.discard(goal_cell)
 

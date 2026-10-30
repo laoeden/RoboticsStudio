@@ -48,6 +48,25 @@ class PlannerTests(unittest.TestCase):
         path = plan_path(0, 0, np.array([5.0, 0.0]), ring, robot_clearance=2.0)
         self.assertEqual(len(path), 0)
 
+    def test_robot_touching_a_trunk_can_back_away(self):
+        # Trunk surface 0.5 m ahead of the lidar (nose almost touching it): every cell
+        # around the robot is inside the hard core, but backing off is still allowed.
+        trunk = np.array([[0.5 * math.cos(a) + 1.0, 0.5 * math.sin(a)]
+                          for a in np.linspace(math.pi - 1.0, math.pi + 1.0, 21)], dtype=np.float32)
+        path = plan_path(0, 0, np.array([-4.0, 0.0]), trunk, robot_clearance=1.5)
+        self.assertGreater(len(path), 0)
+        self.assertAlmostEqual(float(path[-1][0]), -4.0, delta=0.2)
+        # ...and the first steps never move towards the trunk.
+        self.assertLessEqual(float(path[min(2, len(path) - 1)][0]), 0.05)
+
+    def test_robot_touching_a_trunk_cannot_drive_into_it(self):
+        trunk = np.array([[0.5 * math.cos(a) + 1.0, 0.5 * math.sin(a)]
+                          for a in np.linspace(math.pi - 1.0, math.pi + 1.0, 21)], dtype=np.float32)
+        path = plan_path(0, 0, np.array([3.0, 0.0]), trunk, robot_clearance=1.5)
+        # Either no way round, or a way that never gets closer than where it started.
+        if len(path):
+            self.assertGreaterEqual(nearest_obstacle(path, trunk), 0.5 - 0.1)
+
     def test_wall_across_the_way_is_still_avoided(self):
         wall = np.array([[3.0, y] for y in np.arange(-4.0, 4.01, 0.2)], dtype=np.float32)
         path = plan_path(0, 0, np.array([6.0, 0.0]), wall, robot_clearance=1.0)

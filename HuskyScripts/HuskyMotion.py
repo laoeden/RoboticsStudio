@@ -84,6 +84,13 @@ class HuskyMotion(Node):
             # Lidar hits this close to the charging pad are ignored: the pad and its
             # marker are part of the dock, not obstacles to avoid.
             'dock_clear_radius': 1.6,
+            # How long to keep trying (backing out of tight spots) when no path exists
+            # before giving the goal up so the mission can move on.
+            'no_path_timeout': 15.0,
+            # Recovery manoeuvres allowed per goal in total. Jostling closer for a few
+            # centimetres resets max_stuck_recoveries, so this caps goals that can never
+            # be reached (e.g. one inside a tree trunk) rather than letting them run on.
+            'max_goal_recoveries': 4.0,
         }
         for name, value in defaults.items():
             self.declare_parameter(name, value)
@@ -136,6 +143,18 @@ class HuskyMotion(Node):
         self.recovery_turn_direction = 1.0
         self.recovery_attempts = 0
         self.last_command_linear = 0.0
+        self.last_command_angular = 0.0
+        self.motion_ref = None            # (x, y, yaw, time) of the last real movement
+        self.recovery_linear = -self.stuck_recovery_speed
+        self.recovery_turn = self.stuck_recovery_turn_speed
+        self.no_path_since = None
+        self.goal_recoveries = 0
+        self.last_escape_time = 0.0
+        # Nearest lidar return overall / straight behind / straight ahead (metres).
+        self.nearest_range = math.inf
+        self.nearest_bearing = 0.0
+        self.rear_clear = math.inf
+        self.front_clear = math.inf
         self.obstacle_detected = False
         self.estop_active = False
         self.return_wanted = False        # drive to the charging pad until docked
@@ -286,6 +305,20 @@ class HuskyMotion(Node):
                 <= self.dock_clear_radius
             )
         valid &= ~in_dock
+
+        # Clearance around the chassis, used to pick a safe way to back out of trouble.
+        usable = finite & ~in_dock & (ranges >= message.range_min)
+        if np.any(usable):
+            relative = (angles + math.pi) % (2.0 * math.pi) - math.pi
+            nearest_index = int(np.argmin(np.where(usable, ranges, np.inf)))
+            self.nearest_range = float(ranges[nearest_index])
+            self.nearest_bearing = float(relative[nearest_index])
+            behind = usable & (np.abs(relative) >= math.pi - 0.7)
+            ahead = usable & (np.abs(relative) <= 0.7)
+            self.rear_clear = float(np.min(ranges[behind])) if np.any(behind) else math.inf
+            self.front_clear = float(np.min(ranges[ahead])) if np.any(ahead) else math.inf
+        else:
+            self.nearest_range = self.rear_clear = self.front_clear = math.inf
 
         if self.odom is not None and np.any(valid):
             pose = self.odom.pose.pose
@@ -579,6 +612,9 @@ class HuskyMotion(Node):
         self.path = np.empty((0, 2), dtype=np.float32)
         self.path_index = 0
         self.path_replan_requested = True
+        self.no_path_since = None
+        self.motion_ref = None
+        self.goal_recoveries = 0
         clear_event = Bool()
         clear_event.data = False
         self.obstacle_stop_publisher.publish(clear_event)
@@ -602,6 +638,69 @@ class HuskyMotion(Node):
     def stop(self) -> None:
         self.publisher.publish(Twist())
         self.last_command_linear = 0.0
+        self.last_command_angular = 0.0
+
+    def choose_recovery_direction(self) -> None:
+        """Pick how to back out: away from the nearest obstacle, swinging that end clear."""
+        clear = 0.9
+        speed = self.stuck_recovery_speed
+        turn = self.stuck_recovery_turn_speed
+        bearing = self.nearest_bearing if math.isfinite(self.nearest_range) else None
+        if bearing is None or self.nearest_range > 1.5:
+            # Nothing obviously close: the original behaviour (back up, alternate turns).
+            self.recovery_linear = -speed if self.rear_clear >= clear else 0.0
+            self.recovery_turn = self.recovery_turn_direction * turn
+            return
+        ahead = abs(bearing) <= math.pi / 2.0
+        side = 1.0 if bearing >= 0.0 else -1.0
+        if ahead and self.rear_clear >= clear:
+            self.recovery_linear = -speed
+            self.recovery_turn = -side * turn      # swing the nose away from it
+        elif not ahead and self.front_clear >= clear:
+            self.recovery_linear = speed
+            self.recovery_turn = side * turn       # swing the tail away from it
+        elif self.rear_clear >= clear:
+            self.recovery_linear = -speed
+            self.recovery_turn = self.recovery_turn_direction * turn
+        elif self.front_clear >= clear:
+            self.recovery_linear = speed
+            self.recovery_turn = self.recovery_turn_direction * turn
+        else:
+            self.recovery_linear = 0.0
+            self.recovery_turn = self.recovery_turn_direction * turn
+        if self.recovery_attempts % 2 == 0:
+            self.recovery_turn = -self.recovery_turn   # vary the attempt if the last one failed
+
+    def publish_recovery(self) -> None:
+        recovery = Twist()
+        recovery.linear.x = self.recovery_linear
+        recovery.angular.z = self.recovery_turn
+        self.publisher.publish(recovery)
+        self.last_command_linear = recovery.linear.x
+        self.last_command_angular = recovery.angular.z
+
+    def blocked(self, now: float) -> bool:
+        """True when motion has been commanded for a while but the robot has not moved."""
+        if self.odom is None:
+            return False
+        commanded = (
+            abs(self.last_command_linear) > 0.05
+            or abs(self.last_command_angular) > 0.05
+        )
+        position = self.odom.pose.pose.position
+        pose = (position.x, position.y, self.odom_heading)
+        if not commanded or self.motion_ref is None:
+            self.motion_ref = (*pose, now)
+            return False
+        ref_x, ref_y, ref_yaw, ref_time = self.motion_ref
+        moved = (
+            math.hypot(pose[0] - ref_x, pose[1] - ref_y) > 0.05
+            or abs(wrap_angle(pose[2] - ref_yaw)) > 0.05
+        )
+        if moved:
+            self.motion_ref = (*pose, now)
+            return False
+        return now - ref_time >= self.progress_timeout
 
     def tick(self) -> None:
         if self.estop_active:
@@ -659,24 +758,26 @@ class HuskyMotion(Node):
             self.last_progress_time = now
             self.recovery_attempts = 0
 
-        if self.last_command_linear <= 0.05:
+        blocked = self.recovery_until <= now and self.blocked(now)
+        if self.last_command_linear <= 0.05 and not blocked:
             self.last_progress_time = now
+        if blocked:
+            # Commanded to move but not moving (e.g. a corner jammed against a trunk).
+            self.last_progress_time = min(self.last_progress_time, now - self.progress_timeout)
+            self.motion_ref = None
 
         if self.recovery_until > now:
-            recovery = Twist()
-            recovery.linear.x = -self.stuck_recovery_speed
-            recovery.angular.z = (
-                self.recovery_turn_direction * self.stuck_recovery_turn_speed
-            )
-            self.publisher.publish(recovery)
-            self.last_command_linear = recovery.linear.x
+            self.publish_recovery()
             return
 
         if (
             self.stuck_recovery_enabled
             and now - self.last_progress_time >= self.progress_timeout
         ):
-            if self.recovery_attempts >= self.max_stuck_recoveries:
+            if (
+                self.recovery_attempts >= self.max_stuck_recoveries
+                or self.goal_recoveries >= self.max_goal_recoveries
+            ):
                 self.get_logger().error(
                     'Husky did not make progress after recovery attempts; '
                     'cancelling the active goal.'
@@ -688,17 +789,16 @@ class HuskyMotion(Node):
             self.recovery_until = now + self.stuck_recovery_duration
             self.recovery_turn_direction *= -1.0
             self.recovery_attempts += 1
+            self.goal_recoveries += 1
             self.last_progress_time = now
+            self.choose_recovery_direction()
             self.get_logger().warn(
-                'Husky appears stuck; reversing and turning to recover.'
+                'Husky appears stuck; '
+                + ('reversing' if self.recovery_linear < 0 else
+                   'creeping forward' if self.recovery_linear > 0 else 'turning')
+                + ' to recover.'
             )
-            recovery = Twist()
-            recovery.linear.x = -self.stuck_recovery_speed
-            recovery.angular.z = (
-                self.recovery_turn_direction * self.stuck_recovery_turn_speed
-            )
-            self.publisher.publish(recovery)
-            self.last_command_linear = recovery.linear.x
+            self.publish_recovery()
             return
 
         if not self.scan_received:
@@ -725,14 +825,38 @@ class HuskyMotion(Node):
             self.path_index = 0
             self.path_replan_requested = False
             if not self.path.size:
+                if self.no_path_since is None:
+                    self.no_path_since = now
+                if now - self.no_path_since >= self.no_path_timeout:
+                    self.get_logger().error(
+                        'No collision-free path to goal after '
+                        f'{self.no_path_timeout:.0f} s; giving the goal up.'
+                    )
+                    self.publish_status('CANCELLED', 'no collision-free path')
+                    self.goal = None
+                    self.no_path_since = None
+                    self.stop()
+                    return
                 self.get_logger().error(
                     'No collision-free path to goal in current lidar data; '
-                    'holding position and waiting to replan.',
+                    'waiting to replan.',
                     throttle_duration_sec=2.0,
                 )
-                self.stop()
                 self.path_replan_requested = True
+                if (
+                    self.nearest_range < 1.0
+                    and now - self.last_escape_time >= 4.0
+                ):
+                    # Boxed in against something: back or creep away, then replan.
+                    self.last_escape_time = now
+                    self.recovery_turn_direction *= -1.0
+                    self.choose_recovery_direction()
+                    self.recovery_until = now + self.stuck_recovery_duration
+                    self.publish_recovery()
+                else:
+                    self.stop()
                 return
+            self.no_path_since = None
 
         while self.path_index < len(self.path) - 1:
             if np.linalg.norm(
@@ -748,6 +872,20 @@ class HuskyMotion(Node):
         heading = wrap_angle(self.odom_heading + self.odom_to_world_heading)
         heading_error = wrap_angle(math.atan2(dy, dx) - heading)
         command = Twist()
+        if (
+            abs(heading_error) > 2.3
+            and self.nearest_range < 1.1
+            and self.rear_clear > 0.9
+        ):
+            # Target is behind us and something is close: reversing is safer than
+            # spinning, because the chassis corners swing out when it turns on the spot.
+            rear_error = wrap_angle(heading_error - math.copysign(math.pi, heading_error))
+            command.linear.x = -0.3
+            command.angular.z = max(-0.4, min(0.4, self.angular_gain * rear_error))
+            self.publisher.publish(command)
+            self.last_command_linear = command.linear.x
+            self.last_command_angular = command.angular.z
+            return
         requested_turn = max(
             -self.max_angular_speed,
             min(self.max_angular_speed, self.angular_gain * heading_error),
@@ -768,6 +906,7 @@ class HuskyMotion(Node):
         )
         self.publisher.publish(command)
         self.last_command_linear = command.linear.x
+        self.last_command_angular = command.angular.z
 
 
 def main() -> None:
@@ -787,4 +926,4 @@ def main() -> None:
 
 
 if __name__ == '__main__':
-    main() 
+    main()
