@@ -76,13 +76,23 @@
     </sensor>
     <material>Gazebo/Grey</material>
   </gazebo>
-  <!-- Move the base directly through the bridged cmd_vel topic. -->
+ 
+  <!-- Apply planar body-frame velocity commands directly to the base link. -->
   <gazebo>
     <plugin
       filename="libplanar_velocity_control.so"
       name="roboticsstudio::PlanarVelocityControl">
       <topic>model/${gz_model_name}/cmd_vel</topic>
     </plugin>
+  </gazebo>
+
+  <gazebo reference="${prefix}base_link">
+    <sensor type="navsat" name="navsat">
+      <always_on>true</always_on>
+      <update_rate>10</update_rate>
+      <topic>model/${gz_model_name}/navsat</topic>
+      <gz_frame_id>${prefix}base_link</gz_frame_id>
+    </sensor>
   </gazebo>
 
   <!-- Publish odometry separately -->
@@ -103,16 +113,6 @@
       name="ignition::gazebo::systems::JointStatePublisher">
       <topic>model/${gz_model_name}/joint_states</topic>
     </plugin>
-  </gazebo>
-
-  <!-- Publish absolute world position in addition to wheel odometry. -->
-  <gazebo reference="${prefix}base_link">
-    <sensor type="navsat" name="gps">
-      <always_on>true</always_on>
-      <update_rate>10</update_rate>
-      <topic>model/${gz_model_name}/navsat</topic>
-      <gz_frame_id>${prefix}base_link</gz_frame_id>
-    </sensor>
   </gazebo>
 
   <gazebo reference="${prefix}base_scan">

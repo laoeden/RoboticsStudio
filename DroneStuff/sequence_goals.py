@@ -11,6 +11,7 @@ from geometry_msgs.msg import PointStamped
 from nav_msgs.msg import Odometry
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
+from std_msgs.msg import Bool
 
 
 def matching_frame(first: str, second: str) -> bool:
@@ -33,6 +34,7 @@ class GoalSequence(Node):
         self.robot = robot
         self.frame = frame
         self.odometry: Odometry | None = None
+        self.obstacle_stopped = False
         self.publisher = self.create_publisher(PointStamped, 'goal', 10)
         self.create_subscription(
             Odometry,
@@ -40,9 +42,20 @@ class GoalSequence(Node):
             self._on_odometry,
             qos_profile_sensor_data,
         )
+        if robot == 'husky':
+            self.create_subscription(
+                Bool,
+                'obstacle_stop',
+                self._on_obstacle_stop,
+                qos_profile_sensor_data,
+            )
 
     def _on_odometry(self, message: Odometry) -> None:
         self.odometry = message
+
+    def _on_obstacle_stop(self, message: Bool) -> None:
+        if message.data:
+            self.obstacle_stopped = True
 
     def wait_for_connections(self, timeout: float) -> None:
         deadline = time.monotonic() + timeout
@@ -79,6 +92,11 @@ class GoalSequence(Node):
         deadline = time.monotonic() + timeout
         next_publish = 0.0
         while True:
+            if self.obstacle_stopped:
+                raise RuntimeError(
+                    f"Movement '{waypoint.name}' cancelled by front obstacle. "
+                    'The remaining sequence was cancelled.'
+                )
             now = time.monotonic()
             if now >= deadline:
                 raise RuntimeError(f"Movement '{waypoint.name}' timed out.")
@@ -95,15 +113,10 @@ class GoalSequence(Node):
             ):
                 continue
 
-            if self.robot == 'husky':
-                position = odometry.pose.pose.position
-                position_x, position_y = position.x, position.y
-            else:
-                position = odometry.pose.pose.position
-                position_x, position_y = position.x, position.y
+            position = odometry.pose.pose.position
             distance = math.hypot(
-                position_x - waypoint.x,
-                position_y - waypoint.y,
+                position.x - waypoint.x,
+                position.y - waypoint.y,
             )
             if self.robot == 'parrot':
                 distance = math.sqrt(

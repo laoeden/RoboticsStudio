@@ -98,10 +98,13 @@ python3 HuskyScripts/HuskyMotion.py \
 
 Stop the controller with Ctrl+C so it publishes a final zero velocity.
 
-The Husky uses Ignition's `VelocityControl` system on the model `cmd_vel`
-topic. This prioritizes reliable movement to world-coordinate goals over
-physically accurate wheel torque and skid-steer traction. GPS and odometry
-remain enabled for world-position feedback and diagnostics.
+The Husky uses the package's `roboticsstudio::PlanarVelocityControl` system
+on the model `cmd_vel` topic. It applies planar body-frame velocity commands:
+linear X/Y and angular Z are used, while linear Z is held at the current
+vertical velocity and angular X/Y are zeroed. This prioritizes reliable
+movement to world-coordinate goals over physically accurate wheel torque and
+skid-steer traction. GPS is published on `/husky1/gps/fix`, and odometry
+remains enabled for world-position feedback and diagnostics.
 
 Obstacle-aware path planning is enabled by default. `HuskyMotion.py` converts
 lidar returns into world coordinates and uses `grid_path_planner.plan_path` to

@@ -309,6 +309,22 @@ def generate_launch_description():
         name='GZ_SIM_RESOURCE_PATH',
         value=models_dir,
     ))
+    # Make the package-built custom Gazebo system discoverable when the
+    # Husky model is spawned.
+    system_plugins_dir = PathJoinSubstitution([
+        pkg_path,
+        '..',
+        '..',
+        'lib',
+    ])
+    ld.add_action(SetEnvironmentVariable(
+        name='IGN_GAZEBO_SYSTEM_PLUGIN_PATH',
+        value=system_plugins_dir,
+    ))
+    ld.add_action(SetEnvironmentVariable(
+        name='GZ_SIM_SYSTEM_PLUGIN_PATH',
+        value=system_plugins_dir,
+    ))
 
     # Load common Gazebo server systems from a shared config file. This keeps
     # required systems such as Sensors out of individual robot and world files,
