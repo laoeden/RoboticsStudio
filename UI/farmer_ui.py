@@ -104,6 +104,13 @@ ugv_x = None
 ugv_y = None
 ugv_heading = None
 
+ugv_last_seen = None
+uav_last_seen = None
+lidar_last_seen = None
+camera_last_seen = None
+
+ASSET_TIMEOUT = 2.0
+
 latest_lidar_scan = None
 latest_husky_goal = None
 
@@ -125,8 +132,10 @@ survey_mode_active = False      # True while a survey owns the camera-risk pipel
 mission_events = queue.Queue()  # ROS callbacks -> UI thread
 
 def odometry_callback(msg):
-    global ugv_x, ugv_y, ugv_heading, camera_risk_husky_position
+    global ugv_x, ugv_y, ugv_heading, camera_risk_husky_position, ugv_last_seen
 
+    ugv_last_seen = time.monotonic()
+    
     ugv_x = msg.pose.pose.position.x
     ugv_y = msg.pose.pose.position.y
 
@@ -168,8 +177,10 @@ battery_low_sub = ros_node.create_subscription(Bool, "/husky1/battery_low", batt
 charging_sub = ros_node.create_subscription(Bool, "/husky1/charging", charging_callback, 10)
 
 def lidar_callback(msg):
-    global latest_lidar_scan
+    global latest_lidar_scan, lidar_last_seen
+
     latest_lidar_scan = msg
+    lidar_last_seen = time.monotonic()
 
 lidar_sub = ros_node.create_subscription(
     LaserScan,
@@ -221,7 +232,9 @@ husky_goal_sub = ros_node.create_subscription(
 )
 
 def drone_odometry_callback(msg):
-    global uav_x, uav_y, uav_z, drone_odom_sample, uav_odom_history
+    global uav_x, uav_y, uav_z, drone_odom_sample, uav_odom_history, uav_last_seen
+
+    uav_last_seen = time.monotonic()
 
     uav_x = msg.pose.pose.position.x
     uav_y = msg.pose.pose.position.y
@@ -267,10 +280,11 @@ yolo_world_position_sub = ros_node.create_subscription(
 
 
 def yolo_image_callback(msg):
-    global latest_yolo_image
+    global latest_yolo_image, camera_last_seen
 
     try:
         latest_yolo_image = bridge.imgmsg_to_cv2(msg, desired_encoding="bgr8")
+        camera_last_seen = time.monotonic()
     except Exception as error:
         ros_node.get_logger().error(
             f"YOLO image conversion failed: {error}"
@@ -2106,21 +2120,21 @@ tk.Label(
     font=("DejaVu Sans Mono", 10, "bold")
 ).pack(anchor="w", padx=15)
 
-tk.Label(
+asset_status_label = tk.Label(
     right,
     text=(
-        "UGV-01   ONLINE\n"
-        "UAV-01   ONLINE\n"
-        "LIDAR    ACTIVE\n"
-        "CAMERA   ACTIVE\n"
-        "MOWER    STANDBY\n"
-        "LOCALISATION FIXED\n"
+        "UGV-01   OFFLINE\n"
+        "UAV-01   OFFLINE\n"
+        "LIDAR    INACTIVE\n"
+        "CAMERA   INACTIVE"
     ),
     justify="left",
     bg=PANEL,
     fg=TEXT,
     font=("DejaVu Sans Mono", 9)
-).pack(anchor="w", padx=15, pady=10)
+)
+
+asset_status_label.pack(anchor="w", padx=15, pady=10)
 
 
 tk.Frame(right, bg=BORDER, height=1).pack(
@@ -2264,6 +2278,23 @@ def get_synced_uav_position():
 
 def update_telemetry_ui():
     global rtb_active
+
+    now = time.monotonic()
+
+    ugv_online = ugv_last_seen is not None and now - ugv_last_seen < ASSET_TIMEOUT
+    uav_online = uav_last_seen is not None and now - uav_last_seen < ASSET_TIMEOUT
+    lidar_online = lidar_last_seen is not None and now - lidar_last_seen < ASSET_TIMEOUT
+    camera_online = camera_last_seen is not None and now - camera_last_seen < ASSET_TIMEOUT
+
+    asset_status_label.config(
+        text=(
+            f"UGV-01   {'ONLINE' if ugv_online else 'OFFLINE'}\n"
+            f"UAV-01   {'ONLINE' if uav_online else 'OFFLINE'}\n"
+            f"LIDAR    {'ACTIVE' if lidar_online else 'INACTIVE'}\n"
+            f"CAMERA   {'ACTIVE' if camera_online else 'INACTIVE'}"
+        )
+    )
+
     advance_spiral()
     service_mission()
 
@@ -3135,5 +3166,11 @@ def handle_shortcut(event):
         emergency_stop()
 
 root.bind_all("<KeyPress>", handle_shortcut)
+
+def clear_entry_focus(event):
+    if not isinstance(event.widget, tk.Entry):
+        root.focus_set()
+
+root.bind_all("<Button-1>", clear_entry_focus)
 
 root.mainloop()
