@@ -35,6 +35,19 @@ ODOM_HISTORY_S = 5.0
 MAX_DEPTH_FRAMES = 40
 
 
+def grass_class_ids(names) -> set[int]:
+    """Return model class IDs that are allowed to become grass world points."""
+    if isinstance(names, dict):
+        items = names.items()
+    else:
+        items = enumerate(names)
+    return {
+        int(class_id)
+        for class_id, name in items
+        if str(name).strip().casefold() == "dry grass"
+    }
+
+
 def stamp_seconds(header) -> float:
     return header.stamp.sec + header.stamp.nanosec * 1e-9
 
@@ -162,6 +175,12 @@ class CameraInference(Node):
     ) -> None:
         super().__init__("dry_grass_yolo_camera")
         self.model = YOLO(model_path)
+        self.grass_class_ids = grass_class_ids(self.model.names)
+        if not self.grass_class_ids:
+            raise ValueError(
+                f"YOLO model {model_path!r} has no 'Dry Grass' class; "
+                "refusing to publish non-grass detections as hazards."
+            )
         self.bridge = CvBridge()
         self.confidence = confidence
         # Recent depth frames and odometry, so each image is paired with the depth and
@@ -248,7 +267,11 @@ class CameraInference(Node):
         result = self.model.predict(image, conf=self.confidence, verbose=False)[0]
         display = result.plot()
         if depth is not None and odometry is not None:
-            for box in result.boxes.xyxy.cpu().numpy():
+            boxes = result.boxes.xyxy.cpu().numpy()
+            class_ids = result.boxes.cls.cpu().numpy().astype(int)
+            for box, class_id in zip(boxes, class_ids):
+                if class_id not in self.grass_class_ids:
+                    continue
                 camera_point = depth_at_detection(
                     depth,
                     tuple(float(value) for value in box),

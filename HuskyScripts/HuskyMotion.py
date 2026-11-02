@@ -74,11 +74,12 @@ class HuskyMotion(Node):
             'max_stuck_recoveries': 2,
             'obstacle_stopping_enabled': True,
             'progress_stopping_enabled': False,
-            'obstacle_distance': 2.0,
+            # Start replanning before the chassis reaches branches or trunks.
+            'obstacle_distance': 2.5,
             'front_angle': math.pi / 4.0,
-            'planning_range': 5.0,
+            'planning_range': 7.0,
             'path_resolution': 0.2,
-            'robot_clearance': 1.5,
+            'robot_clearance': 2.0,
             'grass_exclusion_radius': 3.5,
             'grass_detection_timeout': 120.0,
             # Lidar hits this close to the charging pad are ignored: the pad and its

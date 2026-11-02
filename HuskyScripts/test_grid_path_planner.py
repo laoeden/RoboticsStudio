@@ -83,6 +83,14 @@ class PlannerTests(unittest.TestCase):
         self.assertGreater(len(path), 0)
         self.assertGreaterEqual(nearest_obstacle(path, obstacles), 1.0 - 0.25)
 
+    def test_larger_clearance_routes_around_branch_margin(self):
+        obstacles = np.array([[3.0, y] for y in np.arange(-1.0, 1.01, 0.2)],
+                             dtype=np.float32)
+        path = plan_path(0, 0, np.array([6.0, 0.0]), obstacles,
+                         robot_clearance=2.0)
+        self.assertGreater(len(path), 0)
+        self.assertGreaterEqual(nearest_obstacle(path, obstacles), 2.0 - 0.25)
+
 
 if __name__ == '__main__':
     unittest.main()

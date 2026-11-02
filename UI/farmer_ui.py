@@ -74,7 +74,8 @@ latest_husky_depth = None
 depth_frame_count = 0
 drone_odom_sample = None
 odom_pin_samples = deque(maxlen=100)
-grass_pinpoints = GrassPinpoints()
+GRASS_DUPLICATE_RADIUS = 5.0
+grass_pinpoints = GrassPinpoints(radius=GRASS_DUPLICATE_RADIUS)
 pinpoint_items = {}
 camera_risk_lock = threading.Lock()
 camera_risk_wakeup = threading.Event()
@@ -85,7 +86,7 @@ husky_dispatch_enabled = False
 camera_risk_active_goal = None
 camera_risk_goal_published = 0
 camera_risk_goal_tolerance = 0.2
-camera_risk_duplicate_radius = 10.0
+camera_risk_duplicate_radius = GRASS_DUPLICATE_RADIUS
 camera_risk_completed_goals = []
 camera_risk_logs = queue.Queue()
 yolo_detection_queue = queue.Queue()
@@ -94,6 +95,7 @@ MAIN_MAP_UPDATE_PERIOD_MS = 500
 DEPTH_DISPLAY_PERIOD_MS = 200
 DEPTH_DISPLAY_SCALE = 0.5
 HUSKY_GRASS_EXCLUSION_RADIUS = 3.5
+HUSKY_ROBOT_CLEARANCE = 2.0
 
 
 def message_time(msg):
@@ -113,6 +115,7 @@ ASSET_TIMEOUT = 2.0
 
 latest_lidar_scan = None
 latest_husky_goal = None
+last_goal_clear_stamp_ns = 0
 
 last_drone_goal = None
 last_ugv_goal = None
@@ -191,6 +194,10 @@ lidar_sub = ros_node.create_subscription(
 
 def husky_goal_callback(msg):
     global latest_husky_goal
+    stamp = msg.header.stamp
+    stamp_ns = stamp.sec * 1_000_000_000 + stamp.nanosec
+    if stamp_ns and stamp_ns <= last_goal_clear_stamp_ns:
+        return
     latest_husky_goal = (
         float(msg.point.x),
         float(msg.point.y)
@@ -456,17 +463,31 @@ def send_drone_goal():
     
 
 def publish_husky_goal(x, y):
+    global latest_husky_goal
     msg = PointStamped()
     msg.header.frame_id = "husky1_odom"
+    msg.header.stamp = ros_node.get_clock().now().to_msg()
     msg.point.x = x
     msg.point.y = y
     msg.point.z = 0.0
 
+    latest_husky_goal = (float(x), float(y))
     husky_goal_pub.publish(msg)
 
     ros_node.get_logger().info(
         f"Sent Husky goal: ({x}, {y})"
     )
+
+
+def clear_displayed_husky_goal():
+    global latest_husky_goal, last_ugv_goal, last_goal_clear_stamp_ns
+    clear_stamp = ros_node.get_clock().now().to_msg()
+    last_goal_clear_stamp_ns = (
+        clear_stamp.sec * 1_000_000_000 + clear_stamp.nanosec
+    )
+    latest_husky_goal = None
+    last_ugv_goal = None
+    last_ugv_goal_label.config(text="--")
 
 
 def send_husky_goal():
@@ -497,7 +518,7 @@ def send_husky_goal():
     add_log("UGV", f"Goal sent: X={x:.1f}, Y={y:.1f}")
 
 def clear_husky_goals():
-    global camera_risk_active_goal, husky_dispatch_enabled, latest_husky_goal
+    global camera_risk_active_goal, husky_dispatch_enabled
 
     if rtb_active:
         add_log("UGV", "Cannot clear goals while returning to base")
@@ -506,9 +527,10 @@ def clear_husky_goals():
     with camera_risk_lock:
         camera_risk_pending_goals.clear()
         camera_risk_active_goal = None
+        camera_risk_completed_goals.clear()
         husky_dispatch_enabled = False
 
-    latest_husky_goal = None
+    clear_displayed_husky_goal()
     publish_command("CLEAR_GOAL")
     add_log("UGV", "UGV goals cleared")
 
@@ -763,6 +785,7 @@ class UiMissionIO(MissionIO):
             camera_risk_active_goal = None
             husky_dispatch_enabled = False
         survey_mode_active = True        # stop the camera tab dispatching the Husky
+        clear_displayed_husky_goal()
         publish_command("CLEAR_GOAL")
         auto_pinpoints.set(True)
 
@@ -2176,6 +2199,8 @@ def clear_grass_pinpoints():
             camera_risk_pending_goals.clear()
             camera_risk_active_goal = None
             camera_risk_completed_goals.clear()
+        clear_displayed_husky_goal()
+        publish_command("CLEAR_GOAL")
     except OSError as error:
         pinpoint_status.config(text=f"Could not clear saved pins: {error}")
         add_log("GRASS", f"Could not clear saved pins: {error}")
@@ -2537,6 +2562,7 @@ def update_main_lidar_overlay():
                 ugv_y,
                 np.asarray(latest_husky_goal, dtype=np.float32),
                 obstacle_points,
+                robot_clearance=HUSKY_ROBOT_CLEARANCE,
             )
             if path.size:
                 path_coordinates = []
@@ -2888,7 +2914,8 @@ def update_lidar_ui():
                     ugv_x,
                     ugv_y,
                     goal,
-                    planning_points
+                    planning_points,
+                    robot_clearance=HUSKY_ROBOT_CLEARANCE,
                 )
 
                 if path.size:

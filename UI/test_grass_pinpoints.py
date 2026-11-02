@@ -20,6 +20,12 @@ class GrassPinpointTests(unittest.TestCase):
         self.assertEqual(tracker.observe([(2.1, 3.1, 0)], 'odom', 10), [])
         self.assertEqual(len(tracker.pins), 1)
 
+    def test_configured_duplicate_radius_applies_to_later_detections(self):
+        tracker = GrassPinpoints(radius=5.0)
+        tracker.observe([(2, 3, 0)], 'odom', 1)
+        self.assertEqual(tracker.observe([(6.9, 3, 0)], 'odom', 2), [])
+        self.assertEqual(len(tracker.pins), 1)
+
     def test_invalid_points_and_missing_frames_are_ignored(self):
         tracker = GrassPinpoints()
         tracker.observe([(float('nan'), 0, 0), (0, float('inf'), 0)], 'odom', 1)
