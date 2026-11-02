@@ -32,11 +32,10 @@
       <link name="terrain_link">
         <collision name="collision">
           <geometry>
-            <heightmap>
-              <uri>../models/GreyHeatMapV2/e9836408f061fe241792508fc50c1535dea7810a.png</uri>
-              <size>50 50 5</size>
-              <pos>0 0 0</pos>
-            </heightmap>
+            <mesh>
+              <uri>../models/GreyHeatMapV2/GreyMapV2Terrain.obj</uri>
+              <scale>0.5 0.5 0.333333</scale>
+            </mesh>
           </geometry>
           <surface>
             <friction>
@@ -132,7 +131,7 @@
         https://fuel.gazebosim.org/1.0/OpenRobotics/models/Oak%20tree
       </uri>
       <name>oak7</name>
-      <pose>2 3 2 0 0 0</pose>
+      <pose>2 3 1.5 0 0 0</pose>
       <static>true</static>
     </include>
 
