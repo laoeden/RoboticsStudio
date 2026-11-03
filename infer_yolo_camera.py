@@ -346,7 +346,7 @@ def main() -> int:
     parser.add_argument("--topic", default="/parrot1/camera/image")
     parser.add_argument("--depth-topic", default="/parrot1/camera/depth/image")
     parser.add_argument("--odom-topic", default="/parrot1/odometry")
-    parser.add_argument("--confidence", type=float, default=0.35)
+    parser.add_argument("--confidence", type=float, default=0.4)
     args = parser.parse_args()
     rclpy.init()
     node = CameraInference(
