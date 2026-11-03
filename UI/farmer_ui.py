@@ -696,7 +696,6 @@ def emergency_stop():
     estop_active = not estop_active
 
     controls = [
-        start_button,
         start_husky_button,
         stop_button,
         rtb_button,
