@@ -3081,15 +3081,20 @@ def update_camera_risk_ui():
             # Outside a survey a new detection is queued for START HUSKY; during a
             # survey the mission decides when the Husky moves.
             if not survey_mode_active:
-                known = [candidate[:2] for candidate in camera_risk_pending_goals]
-                if camera_risk_active_goal is not None:
-                    known.append(camera_risk_active_goal[:2])
-                known.extend(camera_risk_completed_goals)
-                if not any(
-                    np.linalg.norm(point[:2] - old_point) < camera_risk_duplicate_radius
-                    for old_point in known
-                ):
-                    camera_risk_pending_goals.append(point)
+                for pin in added:
+                    known = [candidate[:2] for candidate in camera_risk_pending_goals]
+                    if camera_risk_active_goal is not None:
+                        known.append(camera_risk_active_goal[:2])
+                    known.extend(camera_risk_completed_goals)
+                    if not any(
+                        np.linalg.norm(
+                            np.asarray((pin["x"], pin["y"])) - old_point
+                        ) < camera_risk_duplicate_radius
+                        for old_point in known
+                    ):
+                        camera_risk_pending_goals.append(np.array([
+                            pin["x"], pin["y"], pin["z"],
+                        ]))
         for pin in added:
             add_log(
                 "GRASS",
