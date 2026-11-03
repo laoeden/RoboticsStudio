@@ -72,7 +72,13 @@ UI_PID=$!
 
 cleanup() {
 	trap - INT TERM EXIT
-	kill "$UI_PID" "$CAMERA_INFERENCE_PID" "$BATTERY_PID" "$GRASS_PID" "$HUSKY_PID" "$DRONE_PID" "$SIM_PID" 2>/dev/null || true
+
+	# Let the UI shut down cleanly through its Ctrl+C handler
+	kill -INT "$UI_PID" 2>/dev/null || true
+
+	# Stop the remaining simulation processes
+	kill "$CAMERA_INFERENCE_PID" "$BATTERY_PID" "$GRASS_PID" "$HUSKY_PID" "$DRONE_PID" "$SIM_PID" 2>/dev/null || true
+
 	wait 2>/dev/null || true
 }
 

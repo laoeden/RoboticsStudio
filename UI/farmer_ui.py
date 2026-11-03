@@ -1,5 +1,6 @@
 import sys
 from pathlib import Path
+import signal
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(REPO_ROOT) not in sys.path:
@@ -2317,6 +2318,11 @@ def on_close():
     root.destroy()
 
 root.protocol("WM_DELETE_WINDOW", on_close)
+
+def handle_sigint(signum, frame):
+    root.after(0, on_close)
+
+signal.signal(signal.SIGINT, handle_sigint)
 
 
 def advance_spiral():
