@@ -69,6 +69,7 @@ rclpy.init()
 ros_node = Node("farmer_control_station")
 bridge = CvBridge()
 latest_yolo_image = None
+kangaroo_position = None
 frame_stamps = deque(maxlen=60)   # stamps of Parrot camera frames not yet counted as survey coverage
 latest_husky_depth = None
 depth_frame_count = 0
@@ -277,6 +278,19 @@ def yolo_world_position_callback(msg):
         msg.header.frame_id,
         message_time(msg),
     ))
+
+
+yolo_kangaroo_position_sub = ros_node.create_subscription(
+    PointStamped,
+    "/parrot1/yolo/kangaroo_position",
+    lambda msg: set_kangaroo_position(msg),
+    10,
+)
+
+
+def set_kangaroo_position(msg):
+    global kangaroo_position
+    kangaroo_position = (float(msg.point.x), float(msg.point.y))
 
 
 yolo_world_position_sub = ros_node.create_subscription(
@@ -2461,6 +2475,7 @@ def update_main_lidar_overlay():
     canvas.delete("goal_overlay")
     canvas.delete("husky_goal_overlay")
     canvas.delete("grass_exclusion_overlay")
+    canvas.delete("kangaroo_overlay")
     canvas.delete("path_overlay")
 
     if (
@@ -2608,6 +2623,27 @@ def update_main_lidar_overlay():
                     dash=(8, 4),
                     tags="path_overlay",
                 )
+
+    if kangaroo_position is not None:
+        kangaroo_x, kangaroo_y = world_to_map(*kangaroo_position)
+        canvas.create_oval(
+            kangaroo_x - 7,
+            kangaroo_y - 7,
+            kangaroo_x + 7,
+            kangaroo_y + 7,
+            fill="#d58a45",
+            outline=TEXT,
+            width=2,
+            tags="kangaroo_overlay",
+        )
+        canvas.create_text(
+            kangaroo_x,
+            kangaroo_y + 18,
+            text="KANGAROO",
+            fill="#d58a45",
+            font=("DejaVu Sans Mono", 8, "bold"),
+            tags="kangaroo_overlay",
+        )
 
     with camera_risk_lock:
         pending_goals = [goal.copy() for goal in camera_risk_pending_goals]
