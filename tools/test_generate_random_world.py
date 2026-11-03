@@ -101,6 +101,42 @@ class PlacementTests(unittest.TestCase):
                     for other_x, other_y in points[index + 1:]:
                         self.assertGreaterEqual(math.hypot(x - other_x, y - other_y), 4.4)
 
+    def test_kangaroo_is_randomized_grounded_and_spaced(self):
+        document = ET.parse(self.source)
+        include = ET.SubElement(document.getroot().find('world'), 'include')
+        ET.SubElement(include, 'uri').text = 'model://SomeKangaroo'
+        ET.SubElement(include, 'name').text = 'kangaroo'
+        ET.SubElement(include, 'pose').text = '2 0 999 0 0 0'
+        ET.SubElement(include, 'static').text = 'true'
+        document.write(self.source)
+        document.write(self.reference)
+        poses = []
+        for seed in (23, 24):
+            with patch.object(generator, 'ROOT', self.root):
+                generator.generate(self.source, self.output, seed=seed)
+            world = ET.parse(self.output).getroot().find('world')
+            kangaroos = [item for item in world.findall('include')
+                         if item.findtext('uri') == 'model://SomeKangaroo']
+            self.assertEqual(len(kangaroos), 1)
+            pose = kangaroos[0].findtext('pose')
+            poses.append(pose)
+            x, y, z, roll, pitch, yaw = map(float, pose.split())
+            self.assertAlmostEqual(z, 0.04 * x + 0.08 * y + 4.75, places=5)
+            self.assertEqual((roll, pitch), (0, 0))
+            self.assertLessEqual(abs(yaw), math.pi)
+            for other in world.findall('include'):
+                if other is kangaroos[0]:
+                    continue
+                ox, oy, *_ = map(float, other.findtext('pose').split())
+                radius = (generator.GRASS_CLEARANCE_RADIUS
+                          if other.findtext('uri') == 'model://Dry_Grass' else 2.5)
+                self.assertGreaterEqual(math.hypot(x - ox, y - oy), 2.5 + radius - 1e-6)
+            with patch.object(generator, 'ROOT', self.root):
+                generator.generate(self.output, self.output, seed=seed)
+            regenerated = ET.parse(self.output).getroot().find("world/include[name='kangaroo']/pose")
+            self.assertEqual(regenerated.text, pose)
+        self.assertNotEqual(*poses)
+
 
 if __name__ == '__main__':
     unittest.main()

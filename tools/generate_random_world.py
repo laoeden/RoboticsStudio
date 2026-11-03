@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Randomize RandomWorld vegetation: python3 tools/generate_random_world.py.
+"""Randomize RandomWorld vegetation and kangaroos: python3 tools/generate_random_world.py.
 
-Use --seed NUMBER to repeat a layout. Only vegetation includes are replaced;
+Use --seed NUMBER to repeat a layout. Vegetation and kangaroo includes are replaced;
 terrain, walls, charging station and other objects are preserved.
 Use --launch to regenerate and then open the resulting world in Gazebo.
 """
@@ -21,7 +21,7 @@ ROOT = Path(__file__).resolve().parents[1]
 # 0.057 m below its origin after its DAE transforms and visual pose are applied.
 # Negative values lower the model origin below the sampled ground height.
 # Change these values here; they are applied whenever a new world is generated.
-MODEL_BASE_OFFSETS = {'oak': -0.15, 'pine': -0.03, 'grass': 0.06}
+MODEL_BASE_OFFSETS = {'oak': -0.15, 'pine': -0.03, 'grass': 0.06, 'kangaroo': 0.0}
 
 # Dry_Grass reaches about 2.2 m from its origin, including its ground plane.
 # Reserve 2.5 m for any yaw plus a gap: patch centres stay at least 5 m apart.
@@ -83,7 +83,8 @@ def generate(source, output, trees=None, grass=None, seed=None):
         uri = include.findtext('uri', '').strip()
         kind = ('grass' if uri == 'model://Dry_Grass' else
                 'oak' if uri.endswith('/Oak%20tree') else
-                'pine' if uri.endswith('/Pine%20tree') else None)
+                'pine' if uri.endswith('/Pine%20tree') else
+                'kangaroo' if uri == 'model://SomeKangaroo' else None)
         
         if kind:
             templates[kind] = include
@@ -95,31 +96,35 @@ def generate(source, output, trees=None, grass=None, seed=None):
     # Preserve the number and species already present in this world.
     existing_trees = []
     existing_grass = 0
+    existing_kangaroos = 0
     for include in world.findall('include'):
         uri = include.findtext('uri', '').strip()
         for kind, template in templates.items():
             if uri == template.findtext('uri', '').strip():
                 if kind == 'grass':
                     existing_grass += 1
+                elif kind == 'kangaroo':
+                    existing_kangaroos += 1
                 else:
                     existing_trees.append(kind)
     tree_kinds = existing_trees if trees is None else [rng_kind for rng_kind in
         (['oak'] * max(0, trees - 1) + ['pine'] if trees else [])]
     trees = len(tree_kinds)
     grass = existing_grass if grass is None else grass
-    # Remove old vegetation before adding the new layout.
+    # Remove old vegetation and kangaroos before adding the new layout.
     for include in list(world.findall('include')):
         uri = include.findtext('uri', '').strip()
         if uri in {t.findtext('uri', '').strip() for t in templates.values()}:
             world.remove(include)
     rng = random.Random(seed)
 
-    # Clearance radii for charging pad, Husky, drone/kangaroo and falling rock.
+    # Clearance radii for charging pad, Husky, drone and falling rock.
     occupied = [(0, 0, 3), (-5, 0, 2), (2, 0, 2), (-3, -2, 2)]
-    for category, count, radius in [('tree', trees, 2.5),
+    for category, count, radius in [('kangaroo', existing_kangaroos, 2.5),
+                                    ('tree', trees, 2.5),
                                     ('grass', grass, GRASS_CLEARANCE_RADIUS)]:
         for index in range(count):
-            kind = tree_kinds[index] if category == 'tree' else 'grass'
+            kind = tree_kinds[index] if category == 'tree' else category
             for _ in range(10000):
 
                 # Keep models away from the inward-sloping perimeter walls.
@@ -130,7 +135,7 @@ def generate(source, output, trees=None, grass=None, seed=None):
                 if all(math.hypot(x - ox, y - oy) >= radius + r for ox, oy, r in occupied):
                     break
             else:
-                raise ValueError('Cannot fit requested vegetation counts with safe spacing')
+                raise ValueError('Cannot fit requested object counts with safe spacing')
             
             occupied.append((x, y, radius))
 
@@ -138,6 +143,8 @@ def generate(source, output, trees=None, grass=None, seed=None):
             include = copy.deepcopy(templates[kind])
 
             name = f'{kind}_{index + 1}' if category == 'tree' else ('dry_grass' if index == 0 else f'dry_grass_{index + 1}')
+            if category == 'kangaroo':
+                name = 'kangaroo' if index == 0 else f'kangaroo_{index + 1}'
             include.find('name').text = name
             z = terrain.height(x, y) + MODEL_BASE_OFFSETS[kind]
             include.find('pose').text = f'{x:.6f} {y:.6f} {z:.6f} 0 0 {rng.uniform(-math.pi, math.pi):.6f}'
@@ -167,7 +174,7 @@ def main():
         result = generate(ROOT / 'world/RandomWorld.sdf', args.output, args.trees, args.grass, args.seed)
     except ValueError as error:
         parser.error(str(error))
-    print(f'Randomized vegetation in {result} (seed={args.seed})', flush=True)
+    print(f'Randomized vegetation and kangaroos in {result} (seed={args.seed})', flush=True)
     print('Applied height offsets (m): ' + ', '.join(
         f'{kind}={offset:+.3f}' for kind, offset in MODEL_BASE_OFFSETS.items()
     ), flush=True)
