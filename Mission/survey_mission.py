@@ -8,8 +8,8 @@ Sequence
              ``observe_frame`` so the area actually seen is tracked.
 3. GAP_FILL  re-fly any region the camera missed (at most ``max_gap_rounds``).
 4. SETTLE    hover a few seconds so the last frames finish pinning, then the
-             POI list is frozen and the drone flies home while the Husky works.
-5. HUSKY_TRANSIT / INVESTIGATE  visit each pending POI in a short order. A
+             POI list is frozen and the mission waits for an explicit Husky start.
+5. HUSKY_TRANSIT / INVESTIGATE  after that start, visit each pending POI. A
    POI is "cleared" when ``grassRemover`` reports a removal near it, or a
    "false_positive" when the Husky arrives, dwells, and nothing is removed.
 6. RECHARGE   go home and recharge when the battery cannot cover the next
@@ -51,6 +51,7 @@ class MissionState(str, Enum):
     SWEEP = 'SURVEYING'
     GAP_FILL = 'FILLING GAPS'
     SETTLE = 'PROCESSING SURVEY'
+    WAITING_HUSKY = 'WAITING FOR UGV START'
     HUSKY_TRANSIT = 'HUSKY EN ROUTE'
     INVESTIGATE = 'INVESTIGATING'
     RECHARGE = 'RECHARGING'
@@ -61,7 +62,8 @@ class MissionState(str, Enum):
 
 ACTIVE_STATES = (
     MissionState.TAKEOFF, MissionState.SWEEP, MissionState.GAP_FILL,
-    MissionState.SETTLE, MissionState.HUSKY_TRANSIT, MissionState.INVESTIGATE, MissionState.RECHARGE,
+    MissionState.SETTLE, MissionState.WAITING_HUSKY, MissionState.HUSKY_TRANSIT,
+    MissionState.INVESTIGATE, MissionState.RECHARGE,
     MissionState.HUSKY_RETURN,
 )
 
@@ -90,6 +92,7 @@ class MissionConfig:
     recharge_timeout: float = 600.0
     detour_factor: float = 1.5            # real path / straight line
     battery_margin: float = 5.0           # percent kept in reserve
+    manual_husky_start: bool = False      # wait for start_husky_investigation()
     battery: BatteryConfig = field(default_factory=BatteryConfig)
 
 
@@ -203,6 +206,14 @@ class SurveyMission:
                 return          # too close, or low ground beyond the depth range
             self.grid.mark(x, y, agl, yaw)
 
+    def start_husky_investigation(self, now: float) -> bool:
+        """Release a completed survey into its Husky investigation phase."""
+        with self._lock:
+            if self.state != MissionState.WAITING_HUSKY:
+                return False
+            self._begin_husky_phase(now)
+            return True
+
     def on_hazard_removed(self, x: float, y: float) -> None:
         with self._lock:
             best, best_d = None, self.cfg.poi_match_radius
@@ -241,6 +252,7 @@ class SurveyMission:
                 MissionState.SWEEP: self._tick_sweep,
                 MissionState.GAP_FILL: self._tick_sweep,
                 MissionState.SETTLE: self._tick_settle,
+                MissionState.WAITING_HUSKY: lambda _now, _events: None,
                 MissionState.HUSKY_TRANSIT: self._tick_transit,
                 MissionState.INVESTIGATE: self._tick_investigate,
                 MissionState.RECHARGE: self._tick_recharge,
@@ -405,7 +417,7 @@ class SurveyMission:
 
     def _tick_settle(self, now, events):
         if now - self._phase_start >= self.cfg.settle_time:
-            self._begin_husky_phase(now)
+            self._prepare_husky_phase(now)
 
     def _check_drone_return(self, now) -> None:
         if not self._drone_returning or self._drone_home:
@@ -416,12 +428,12 @@ class SurveyMission:
             self.io.log('UAV', 'Drone back at base')
 
     # --------------------------------------------------------------- husky side
-    def _begin_husky_phase(self, now) -> None:
-        cfg = self.cfg
-        # The drone goes home while the Husky works.
+    def _prepare_husky_phase(self, now) -> None:
+        # The drone returns as soon as the survey is complete; the Husky may
+        # still wait for the operator before investigating.
         self._drone_returning = True
         self._drone_return_time = now
-        self.io.drone_goal(*cfg.drone_base)
+        self.io.drone_goal(*self.cfg.drone_base)
         self.io.log('UAV', 'Returning to base')
         found = self.io.list_pois(self.area)
         self.pois = {p['id']: {'id': p['id'], 'x': float(p['x']), 'y': float(p['y']),
@@ -429,12 +441,20 @@ class SurveyMission:
         for poi in self.pois.values():
             self.io.mark_poi(poi['id'], PENDING)
         self.pois_frozen = True
+        self._phase_start = now
         if not self.pois:
             self.io.log('MISSION', 'No points of interest found; the Husky stays at base')
             self._finish(now)
             return
-        self.io.log('MISSION', f'{len(self.pois)} point(s) of interest found')
-        self._phase_start = now
+        if not self.cfg.manual_husky_start:
+            self._begin_husky_phase(now)
+            return
+        self.io.log('MISSION',
+                    f'{len(self.pois)} point(s) of interest found; '
+                    'press START UGV to investigate')
+        self.state = MissionState.WAITING_HUSKY
+
+    def _begin_husky_phase(self, now) -> None:
         self._plan_order()
         self._next_poi(now)
 
