@@ -414,6 +414,8 @@ husky_goal_pub = ros_node.create_publisher(
 
 
 def publish_command(command):
+    if command == "CLEAR_GOAL":
+        clear_displayed_husky_goal()
     msg = String()
     msg.data = command
     mission_command_pub.publish(msg)
