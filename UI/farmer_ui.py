@@ -1,11 +1,12 @@
 import sys
 from pathlib import Path
+import signal
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(REPO_ROOT) not in sys.path:
     sys.path.append(str(REPO_ROOT))
 
-from UI.grass_pinpoints import GrassPinpoints
+from UI.grass_pinpoints import GrassPinpoints, OPEN_STATUSES
 from collections import deque
 from HuskyScripts.grid_path_planner import plan_path
 from Mission.coverage_planner import CAMERA_DROP, Rect, SurveyConfig, footprint, plan_survey
@@ -69,6 +70,7 @@ rclpy.init()
 ros_node = Node("farmer_control_station")
 bridge = CvBridge()
 latest_yolo_image = None
+kangaroo_position = None
 frame_stamps = deque(maxlen=60)   # stamps of Parrot camera frames not yet counted as survey coverage
 latest_husky_depth = None
 depth_frame_count = 0
@@ -279,6 +281,19 @@ def yolo_world_position_callback(msg):
     ))
 
 
+yolo_kangaroo_position_sub = ros_node.create_subscription(
+    PointStamped,
+    "/parrot1/yolo/kangaroo_position",
+    lambda msg: set_kangaroo_position(msg),
+    10,
+)
+
+
+def set_kangaroo_position(msg):
+    global kangaroo_position
+    kangaroo_position = (float(msg.point.x), float(msg.point.y))
+
+
 yolo_world_position_sub = ros_node.create_subscription(
     PointStamped,
     "/parrot1/yolo/world_position",
@@ -414,6 +429,8 @@ husky_goal_pub = ros_node.create_publisher(
 
 
 def publish_command(command):
+    if command == "CLEAR_GOAL":
+        clear_displayed_husky_goal()
     msg = String()
     msg.data = command
     mission_command_pub.publish(msg)
@@ -422,11 +439,16 @@ def publish_command(command):
 
 
 def publish_drone_goal(x, y, z):
+    global last_drone_goal
     msg = PointStamped()
     msg.header.frame_id = "parrot1_odom"
     msg.point.x = x
     msg.point.y = y
     msg.point.z = z
+    last_drone_goal = (float(x), float(y), float(z))
+    last_uav_goal_label.config(
+        text=f"{x:.1f}, {y:.1f}, {z:.1f}"
+    )
     drone_goal_pub.publish(msg)
     ros_node.get_logger().info(f"Sent drone goal: ({x}, {y}, {z})")
 
@@ -453,12 +475,6 @@ def send_drone_goal():
         add_log("UAV", "ERROR: Altitude must be greater than 0 m")
         return
 
-    last_drone_goal = (x, y, z)
-
-    last_uav_goal_label.config(
-    text=f"{x:.1f}, {y:.1f}, {z:.1f}"
-)
-    
     publish_drone_goal(x, y, z)
     add_log("UAV", f"Goal sent: X={x:.1f}, Y={y:.1f}, Z={z:.1f}")
     
@@ -473,6 +489,7 @@ def publish_husky_goal(x, y):
     msg.point.z = 0.0
 
     latest_husky_goal = (float(x), float(y))
+    last_ugv_goal_label.config(text=f"{x:.1f}, {y:.1f}")
     husky_goal_pub.publish(msg)
 
     ros_node.get_logger().info(
@@ -509,12 +526,6 @@ def send_husky_goal():
         add_log("UGV", "ERROR: Target must be inside the field (-25 to 25 m)")
         return
 
-    last_ugv_goal = (x, y)
-
-    last_ugv_goal_label.config(
-    text=f"{x:.1f}, {y:.1f}"
-)
-    
     publish_husky_goal(x, y)
     add_log("UGV", f"Goal sent: X={x:.1f}, Y={y:.1f}")
 
@@ -599,6 +610,18 @@ def pause_husky_dispatch():
             camera_risk_active_goal = None
 
 
+def sort_husky_goals_by_distance(position):
+    """Put queued goals in nearest-first order from the current Husky position."""
+    if position is None:
+        return
+    camera_risk_pending_goals.sort(
+        key=lambda goal: math.hypot(
+            float(goal[0]) - position[0],
+            float(goal[1]) - position[1],
+        )
+    )
+
+
 def start_husky():
     """Release collected coordinates independently of the detection source."""
     global husky_dispatch_enabled
@@ -611,6 +634,12 @@ def start_husky():
         add_log("UGV", "Cannot start: emergency stop is active")
         return
 
+    if mission.state == MissionState.WAITING_HUSKY:
+        if mission.start_husky_investigation(time.monotonic()):
+            status_value.config(text="ACTIVE", fg=GREEN_BRIGHT)
+            mission_value.config(text="UGV INVESTIGATION")
+            add_log("UGV", "Husky investigation started")
+        return
     if mission.active:
         add_log("UGV", "A survey is running; abort it before starting the Husky")
         return
@@ -623,6 +652,7 @@ def start_husky():
         if not camera_risk_pending_goals:
             add_log("UGV", "No collected coordinates available yet")
             return
+        sort_husky_goals_by_distance(camera_risk_husky_position)
         husky_dispatch_enabled = True
         target_count = len(camera_risk_pending_goals)
     camera_risk_wakeup.set()
@@ -667,7 +697,6 @@ def emergency_stop():
     estop_active = not estop_active
 
     controls = [
-        start_button,
         start_husky_button,
         stop_button,
         rtb_button,
@@ -729,7 +758,11 @@ MIN_SURVEY_SIDE = 4.0             # smallest area that can be drawn (m)
 SURVEY_CFG = SurveyConfig()
 # Hover a little longer than the default after the sweep: YOLO inference on a software-rendered
 # simulation can lag the camera by a few seconds, and late sightings still need to become pins.
-MISSION_CFG = MissionConfig(survey=SURVEY_CFG, settle_time=6.0)
+MISSION_CFG = MissionConfig(
+    survey=SURVEY_CFG,
+    settle_time=6.0,
+    manual_husky_start=True,
+)
 
 POI_COLOURS = {
     "pending": AMBER,
@@ -1207,10 +1240,15 @@ def refresh_survey_ui():
     progress_label.config(text=f"{status['progress'] * 100:.0f}%")
     if status["pois_found"]:
         hazards_label.config(
-            text=f"{status['pois_cleared']}/{status['pois_total']}"
+            text=f"{status['pois_open']} remaining"
         )
     elif state == MissionState.IDLE:
-        hazards_label.config(text="--")
+        with camera_risk_lock:
+            remaining = sum(
+                pin.get("status", "pending") in OPEN_STATUSES
+                for pin in grass_pinpoints.pins
+            )
+        hazards_label.config(text=f"{remaining} remaining")
     mode_label.config(text="SURVEY/INVESTIGATE" if active else "STANDBY")
 
     if state != MissionState.IDLE:
@@ -1235,6 +1273,15 @@ def refresh_survey_ui():
 
     if active or state != MissionState.IDLE:
         draw_coverage_overlay()
+
+
+def active_grass_goal_for_display():
+    with camera_risk_lock:
+        if camera_risk_active_goal is not None:
+            return camera_risk_active_goal[:2]
+    if mission.current is not None and mission.current.get("status") == "active":
+        return mission.current["x"], mission.current["y"]
+    return None
 
 
 def service_mission():
@@ -1815,7 +1862,6 @@ def tactical_button(text, command, colour=TEXT):
     return button
 
 
-start_button = tactical_button("[ START UAV ] S", start_mission, GREEN_BRIGHT)
 start_husky_button = tactical_button("[ START UGV ] G", start_husky, GREEN_BRIGHT)
 clear_husky_button = tactical_button("[ CLEAR UGV GOALS ]", clear_husky_goals)
 stop_button = tactical_button("[ STOP ] X", stop_mission, AMBER)
@@ -2273,6 +2319,11 @@ def on_close():
 
 root.protocol("WM_DELETE_WINDOW", on_close)
 
+def handle_sigint(signum, frame):
+    root.after(0, on_close)
+
+signal.signal(signal.SIGINT, handle_sigint)
+
 
 def advance_spiral():
     global spiral_active, spiral_index
@@ -2429,6 +2480,7 @@ def update_main_lidar_overlay():
     canvas.delete("goal_overlay")
     canvas.delete("husky_goal_overlay")
     canvas.delete("grass_exclusion_overlay")
+    canvas.delete("kangaroo_overlay")
     canvas.delete("path_overlay")
 
     if (
@@ -2538,12 +2590,7 @@ def update_main_lidar_overlay():
                         ugv_x + cos_yaw * local_x - sin_yaw * local_y,
                         ugv_y + sin_yaw * local_x + cos_yaw * local_y,
                     )).astype(np.float32)
-            with camera_risk_lock:
-                active_grass_goal = (
-                    None
-                    if camera_risk_active_goal is None
-                    else camera_risk_active_goal.copy()
-                )
+            active_grass_goal = active_grass_goal_for_display()
             if (
                 active_grass_goal is not None
                 and math.hypot(
@@ -2582,6 +2629,27 @@ def update_main_lidar_overlay():
                     tags="path_overlay",
                 )
 
+    if kangaroo_position is not None:
+        kangaroo_x, kangaroo_y = world_to_map(*kangaroo_position)
+        canvas.create_oval(
+            kangaroo_x - 7,
+            kangaroo_y - 7,
+            kangaroo_x + 7,
+            kangaroo_y + 7,
+            fill="#d58a45",
+            outline=TEXT,
+            width=2,
+            tags="kangaroo_overlay",
+        )
+        canvas.create_text(
+            kangaroo_x,
+            kangaroo_y + 18,
+            text="KANGAROO",
+            fill="#d58a45",
+            font=("DejaVu Sans Mono", 8, "bold"),
+            tags="kangaroo_overlay",
+        )
+
     with camera_risk_lock:
         pending_goals = [goal.copy() for goal in camera_risk_pending_goals]
         active_goal = (
@@ -2589,6 +2657,8 @@ def update_main_lidar_overlay():
             if camera_risk_active_goal is None
             else camera_risk_active_goal.copy()
         )
+    if active_goal is None:
+        active_goal = active_grass_goal_for_display()
     if active_goal is not None:
         exclusion_x, exclusion_y = world_to_map(
             active_goal[0],
@@ -2869,12 +2939,7 @@ def update_lidar_ui():
         # Goal + planned path
         # -------------------------
 
-        with camera_risk_lock:
-            active_grass_goal = (
-                None
-                if camera_risk_active_goal is None
-                else camera_risk_active_goal.copy()
-            )
+        active_grass_goal = active_grass_goal_for_display()
         if active_grass_goal is not None:
             lidar_grass_exclusion.center = (
                 float(active_grass_goal[0]),
@@ -3030,6 +3095,7 @@ def yolo_detection_worker():
                 and camera_risk_active_goal is None
                 and camera_risk_pending_goals
             ):
+                sort_husky_goals_by_distance(husky_position)
                 camera_risk_active_goal = camera_risk_pending_goals.pop(0)
                 publish_husky_goal(
                     float(camera_risk_active_goal[0]),
@@ -3198,9 +3264,7 @@ def handle_shortcut(event):
         return
     key = event.keysym.lower()
 
-    if key == "s":
-        start_mission()
-    elif key == "g":
+    if key == "g":
         start_husky()
     elif key == "x":
         stop_mission()

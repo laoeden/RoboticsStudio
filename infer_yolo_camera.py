@@ -48,6 +48,18 @@ def grass_class_ids(names) -> set[int]:
     }
 
 
+def class_ids_named(names, target: str) -> set[int]:
+    if isinstance(names, dict):
+        items = names.items()
+    else:
+        items = enumerate(names)
+    return {
+        int(class_id)
+        for class_id, name in items
+        if str(name).strip().casefold() == target.casefold()
+    }
+
+
 def stamp_seconds(header) -> float:
     return header.stamp.sec + header.stamp.nanosec * 1e-9
 
@@ -176,6 +188,7 @@ class CameraInference(Node):
         super().__init__("dry_grass_yolo_camera")
         self.model = YOLO(model_path)
         self.grass_class_ids = grass_class_ids(self.model.names)
+        self.kangaroo_class_ids = class_ids_named(self.model.names, "Kangaroo")
         if not self.grass_class_ids:
             raise ValueError(
                 f"YOLO model {model_path!r} has no 'Dry Grass' class; "
@@ -201,6 +214,11 @@ class CameraInference(Node):
         self.world_position_publisher = self.create_publisher(
             PointStamped,
             "/parrot1/yolo/world_position",
+            10,
+        )
+        self.kangaroo_position_publisher = self.create_publisher(
+            PointStamped,
+            "/parrot1/yolo/kangaroo_position",
             10,
         )
         self.annotated_image_publisher = self.create_publisher(
@@ -270,7 +288,10 @@ class CameraInference(Node):
             boxes = result.boxes.xyxy.cpu().numpy()
             class_ids = result.boxes.cls.cpu().numpy().astype(int)
             for box, class_id in zip(boxes, class_ids):
-                if class_id not in self.grass_class_ids:
+                if (
+                    class_id not in self.grass_class_ids
+                    and class_id not in self.kangaroo_class_ids
+                ):
                     continue
                 camera_point = depth_at_detection(
                     depth,
@@ -288,7 +309,10 @@ class CameraInference(Node):
                     world_message.point.x = float(point[0])
                     world_message.point.y = float(point[1])
                     world_message.point.z = float(point[2])
-                    self.world_position_publisher.publish(world_message)
+                    if class_id in self.grass_class_ids:
+                        self.world_position_publisher.publish(world_message)
+                    else:
+                        self.kangaroo_position_publisher.publish(world_message)
                 x1, y1 = int(box[0]), int(box[1])
                 cv2.putText(
                     display,
@@ -346,7 +370,7 @@ def main() -> int:
     parser.add_argument("--topic", default="/parrot1/camera/image")
     parser.add_argument("--depth-topic", default="/parrot1/camera/depth/image")
     parser.add_argument("--odom-topic", default="/parrot1/odometry")
-    parser.add_argument("--confidence", type=float, default=0.4)
+    parser.add_argument("--confidence", type=float, default=0.7)
     args = parser.parse_args()
     rclpy.init()
     node = CameraInference(
