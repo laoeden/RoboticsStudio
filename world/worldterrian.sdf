@@ -87,7 +87,7 @@
         https://fuel.gazebosim.org/1.0/OpenRobotics/models/Oak%20tree
       </uri>
       <name>oak2</name>
-      <pose>0 -14 2.62 0 0 0</pose>
+      <pose>0 -14 1.69 0 0 0</pose>
       <static>true</static>
     </include>
 
