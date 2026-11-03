@@ -14,6 +14,7 @@ fi
 # Pass RandomWorld for a fresh layout on every simulation launch.
 WORLD="${1:-worldterrian}"
 
+
 echo "Starting FARMER simulation ($WORLD)..."
 
 #./run_farmer.bash RandomWorld
