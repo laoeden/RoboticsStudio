@@ -96,6 +96,7 @@ DEPTH_DISPLAY_PERIOD_MS = 200
 DEPTH_DISPLAY_SCALE = 0.5
 HUSKY_GRASS_EXCLUSION_RADIUS = 3.5
 HUSKY_ROBOT_CLEARANCE = 2.0
+HUSKY_PLANNING_RANGE = 5.0
 
 
 def message_time(msg):
@@ -2561,7 +2562,12 @@ def update_main_lidar_overlay():
                 ugv_x,
                 ugv_y,
                 np.asarray(latest_husky_goal, dtype=np.float32),
-                obstacle_points,
+                obstacle_points[
+                    np.linalg.norm(
+                        obstacle_points - np.asarray((ugv_x, ugv_y)),
+                        axis=1,
+                    ) <= HUSKY_PLANNING_RANGE
+                ],
                 robot_clearance=HUSKY_ROBOT_CLEARANCE,
             )
             if path.size:
@@ -2897,6 +2903,12 @@ def update_lidar_ui():
                 and ugv_y is not None
             ):
                 planning_points = world_points
+                planning_points = planning_points[
+                    np.linalg.norm(
+                        planning_points - np.asarray((ugv_x, ugv_y)),
+                        axis=1,
+                    ) <= HUSKY_PLANNING_RANGE
+                ]
                 if (
                     active_grass_goal is not None
                     and math.hypot(

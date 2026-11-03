@@ -77,7 +77,9 @@ class HuskyMotion(Node):
             # Start replanning before the chassis reaches branches or trunks.
             'obstacle_distance': 2.5,
             'front_angle': math.pi / 4.0,
-            'planning_range': 7.0,
+            # Keep the planning window local; farther terrain returns can form
+            # artificial barriers because this is a single horizontal scan.
+            'planning_range': 5.0,
             'path_resolution': 0.2,
             'robot_clearance': 2.0,
             'grass_exclusion_radius': 3.5,
