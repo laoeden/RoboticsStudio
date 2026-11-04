@@ -54,7 +54,7 @@
     <include>
       <uri>model://SomeKangaroo</uri>
       <name>kangaroo</name>
-      <pose>2 0 0.960 0 0 0</pose>
+      <pose>-16.454249 -14.712279 1.152076 0 0 -1.312780</pose>
       <static>true</static>
     </include>
     <model name="charging_station">
