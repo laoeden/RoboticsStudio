@@ -189,6 +189,7 @@ class CameraInference(Node):
         self.model = YOLO(model_path)
         self.grass_class_ids = grass_class_ids(self.model.names)
         self.kangaroo_class_ids = class_ids_named(self.model.names, "Kangaroo")
+        # MAKES SURE THE MODEL HAS A GRASS CLASS #
         if not self.grass_class_ids:
             raise ValueError(
                 f"YOLO model {model_path!r} has no 'Dry Grass' class; "
@@ -196,15 +197,11 @@ class CameraInference(Node):
             )
         self.bridge = CvBridge()
         self.confidence = confidence
-        # Recent depth frames and odometry, so each image is paired with the depth and
-        # drone pose from the moment it was captured: the drone keeps moving, and at
-        # 2 m/s every 0.25 s of mismatch is 0.5 m of position error.
+        # Buffers of (stamp, value) pairs, sorted by stamp. The oldest is at the left.
         self.depth_buffer: deque = deque()
         self.odom_buffer: deque = deque()
-        # YOLO runs on its own thread. On a CPU one frame can take seconds; run inside the
-        # ROS callback it would stop this node from receiving odometry and depth meanwhile,
-        # and the samples belonging to the image would be gone by the time it finished.
-        self._pending = None            # newest (image, depth, odometry); older frames are dropped
+        # The YOLO thread is fed the newest (image, depth, odometry) tuple; older frames are dropped.
+        self._pending = None            
         self._wake = threading.Condition()
         self._stopping = False
         self._worker = threading.Thread(
@@ -239,7 +236,7 @@ class CameraInference(Node):
         stamp = stamp_seconds(message.header)
         depth_sample = nearest_sample(self.depth_buffer, stamp, DEPTH_TOLERANCE_S)
         odom_sample = nearest_sample(self.odom_buffer, stamp, ODOM_TOLERANCE_S)
-        if depth_sample is None or odom_sample is None:
+        if depth_sample is None or odom_sample is None: # No matching samples found
             def gap(buffer):
                 return (
                     "none received" if not buffer
@@ -281,8 +278,11 @@ class CameraInference(Node):
         self._worker.join(timeout=2.0)
 
     def process(self, message: Image, depth, odometry) -> None:
+        # The YOLO model expects a BGR8 image, but ROS camera images are usually RGB8.
         image = self.bridge.imgmsg_to_cv2(message, desired_encoding="bgr8")
+        # Model detects objects in the image and returns a list of results, one per image. We only have one image.
         result = self.model.predict(image, conf=self.confidence, verbose=False)[0]
+        # Draw the detections on the image for display, and publish world positions for grass and kangaroo detections.
         display = result.plot()
         if depth is not None and odometry is not None:
             boxes = result.boxes.xyxy.cpu().numpy()
@@ -309,10 +309,12 @@ class CameraInference(Node):
                     world_message.point.x = float(point[0])
                     world_message.point.y = float(point[1])
                     world_message.point.z = float(point[2])
+                    # If succesful, publish
                     if class_id in self.grass_class_ids:
                         self.world_position_publisher.publish(world_message)
                     else:
                         self.kangaroo_position_publisher.publish(world_message)
+                # Draw the label above the box, but not off the top of the image.
                 x1, y1 = int(box[0]), int(box[1])
                 cv2.putText(
                     display,
@@ -323,6 +325,7 @@ class CameraInference(Node):
                     (0, 255, 0),
                     2,
                 )
+        # Publish the annotated image, even if no world positions were published.
         annotated_message = self.bridge.cv2_to_imgmsg(display, encoding="bgr8")
         annotated_message.header = message.header
         self.annotated_image_publisher.publish(annotated_message)
@@ -340,6 +343,7 @@ class CameraInference(Node):
         remember(self.odom_buffer, stamp_seconds(message.header), message, ODOM_HISTORY_S)
 
     def _depth_from_message(self, message: Image) -> np.ndarray:
+        # Expected depth encodings are 32FC1 (float32 meters) or 16UC1 (uint16 millimeters).
         if message.encoding not in ("32FC1", "16UC1"):
             raise ValueError(
                 f"Unsupported depth encoding: {message.encoding!r}. "
