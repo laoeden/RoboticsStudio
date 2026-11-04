@@ -1806,8 +1806,6 @@ def info_row(parent, label, value):
 battery_label = info_row(left, "BATTERY", "-- %")
 progress_label = info_row(left, "PROGRESS", "0%")
 hazards_label = info_row(left, "HAZARDS", "--")
-info_row(left, "LOCALISATION", "FIXED")
-info_row(left, "LINK", "GOOD")
 
 ugv_x_label = info_row(left, "UGV X", "-- m")
 ugv_y_label = info_row(left, "UGV Y", "-- m")
@@ -1815,8 +1813,8 @@ uav_x_label = info_row(left, "UAV X", "-- m")
 uav_y_label = info_row(left, "UAV Y", "-- m")
 uav_z_label = info_row(left, "UAV Z", "-- m")
 
-last_uav_goal_label = info_row(left, "LAST UAV GOAL", "--")
-last_ugv_goal_label = info_row(left, "LAST UGV GOAL", "--")
+last_uav_goal_label = info_row(left, "LAST UAV TARGET", "--")
+last_ugv_goal_label = info_row(left, "LAST UGV TARGET", "--")
 
 
 tk.Frame(left, bg=BORDER, height=1).pack(
@@ -1863,7 +1861,7 @@ def tactical_button(text, command, colour=TEXT):
 
 
 start_husky_button = tactical_button("[ START UGV ] G", start_husky, GREEN_BRIGHT)
-clear_husky_button = tactical_button("[ CLEAR UGV GOALS ]", clear_husky_goals)
+clear_husky_button = tactical_button("[ CLEAR UGV GOALS ] C", clear_husky_goals)
 stop_button = tactical_button("[ STOP ] X", stop_mission, AMBER)
 rtb_button = tactical_button("[ RETURN TO BASE ] R", return_to_base)
 estop_button = tactical_button("[ EMERGENCY STOP ] E", emergency_stop, RED)
@@ -2212,28 +2210,6 @@ tk.Frame(right, bg=BORDER, height=1).pack(
     padx=12,
     pady=12
 )
-
-tk.Label(
-    right,
-    text="HAZARD STATUS",
-    bg=PANEL,
-    fg=GREEN_BRIGHT,
-    font=("DejaVu Sans Mono", 10, "bold")
-).pack(anchor="w", padx=15)
-
-tk.Label(
-    right,
-    text=(
-        "RISK LEVEL: LOW\n"
-        "DETECTIONS: 0\n"
-        "ALERT STATE: CLEAR"
-    ),
-    justify="left",
-    bg=PANEL,
-    fg=TEXT,
-    font=("DejaVu Sans Mono", 9)
-).pack(anchor="w", padx=15, pady=10)
-
 
 def clear_grass_pinpoints():
     global last_pinpoint_stamp, camera_risk_active_goal
@@ -3272,6 +3248,8 @@ def handle_shortcut(event):
         return_to_base()
     elif key == "e":
         emergency_stop()
+    elif key == "c":
+        clear_husky_goals()
 
 root.bind_all("<KeyPress>", handle_shortcut)
 
