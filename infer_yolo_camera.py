@@ -23,13 +23,10 @@ CX = 360.0
 CY = 240.0
 MIN_DEPTH_M = 0.4
 MAX_DEPTH_M = 10.0
-# How far from the image's timestamp the paired depth frame / odometry may be. Odometry
-# decides where the drone was, so it must be close; depth only gives the range to the
-# ground, which barely changes over half a second.
+# How long (in message time) depth and odometry can be apart from the image for pairing.
 DEPTH_TOLERANCE_S = 0.5
 ODOM_TOLERANCE_S = 0.15
-# How long (in message time) depth and odometry are kept for pairing. Images are paired the
-# moment they arrive, so a few seconds is plenty; the frame cap bounds memory (about 1.4 MB each).
+# How long to keep depth and odometry samples for pairing with images.
 DEPTH_HISTORY_S = 3.0
 ODOM_HISTORY_S = 5.0
 MAX_DEPTH_FRAMES = 40
@@ -49,6 +46,7 @@ def grass_class_ids(names) -> set[int]:
 
 
 def class_ids_named(names, target: str) -> set[int]:
+    """Return model class IDs that match the given name (case-insensitive)."""
     if isinstance(names, dict):
         items = names.items()
     else:
@@ -61,6 +59,7 @@ def class_ids_named(names, target: str) -> set[int]:
 
 
 def stamp_seconds(header) -> float:
+    """Return the timestamp of a message header in seconds."""
     return header.stamp.sec + header.stamp.nanosec * 1e-9
 
 
@@ -163,6 +162,7 @@ def world_position(
     camera_point: np.ndarray,
     odometry: Odometry,
 ) -> np.ndarray:
+    """Return the world position of a camera point, given odometry."""
     pose = odometry.pose.pose
     quaternion = np.array([
         pose.orientation.x,
